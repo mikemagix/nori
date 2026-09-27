@@ -1,0 +1,123 @@
+package deploytemplate
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestBuildPlanSingleContainerUsesPinnedImageAndOwnedResources(t *testing.T) {
+	plan, err := BuildPlan(Input{
+		ServiceID:   42,
+		ServiceName: "blog",
+		TargetImage: "ghcr.io/acme/blog@sha256:abc",
+		Config: Config{
+			Mode:           ModeSingleContainer,
+			Version:        1,
+			InternalPort:   8080,
+			RestartPolicy:  RestartUnlessStopped,
+			ServingNetwork: "proxy",
+			Volumes:        []VolumeMount{{Name: "uploads", Target: "/app/uploads"}},
+			Health:         HealthCheck{URL: "http://127.0.0.1:8080/health", TimeoutSeconds: 30},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.AppCandidate.Name != "nori-42-app-candidate" {
+		t.Fatalf("candidate name = %q", plan.AppCandidate.Name)
+	}
+	if plan.AppCandidate.Image != "ghcr.io/acme/blog@sha256:abc" {
+		t.Fatalf("candidate image = %q", plan.AppCandidate.Image)
+	}
+	for key, want := range map[string]string{
+		"nori.service":    "blog",
+		"nori.template":   "1",
+		"nori.service-id": "42",
+		"nori.role":       "candidate",
+	} {
+		if got := plan.AppCandidate.Labels[key]; got != want {
+			t.Fatalf("candidate label %s = %q, want %q", key, got, want)
+		}
+	}
+	if len(plan.Volumes) != 1 || plan.Volumes[0].Name != "nori-42-volume-uploads" {
+		t.Fatalf("volumes = %+v", plan.Volumes)
+	}
+	if len(plan.Actions) == 0 || !strings.Contains(plan.Actions[0].Description, "Pull ghcr.io/acme/blog@sha256:abc") {
+		t.Fatalf("first action = %+v", plan.Actions)
+	}
+	preview := plan.Preview()
+	if strings.Contains(preview, "SECRET=top-secret") {
+		t.Fatalf("preview leaked a value: %q", preview)
+	}
+}
+
+func TestBuildPlanPostgresRejectsMutableImageAndUnsafeHealth(t *testing.T) {
+	_, err := BuildPlan(Input{
+		ServiceID: 1, ServiceName: "api", TargetImage: "example/api@sha256:abc",
+		Config: Config{
+			Mode: ModePostgres, Version: 1, InternalPort: 8080, RestartPolicy: RestartAlways,
+			Health:   HealthCheck{Command: "curl -f http://localhost/health", TimeoutSeconds: 0},
+			Postgres: &PostgresConfig{Image: "postgres:latest", Database: "api", User: "api", PasswordEnv: "POSTGRES_PASSWORD", ConnectionURLEnv: "DATABASE_URL"},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected invalid postgres template")
+	}
+	if !strings.Contains(err.Error(), "postgres image") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestRenderCustomScriptUsesRuntimeReferencesWithoutSecretValues(t *testing.T) {
+	plan, err := BuildPlan(Input{
+		ServiceID: 7, ServiceName: "api", TargetImage: "example/api@sha256:abc",
+		Config: Config{
+			Mode: ModeSingleContainer, Version: 1, InternalPort: 3000, RestartPolicy: RestartAlways,
+			Health: HealthCheck{Command: "true", TimeoutSeconds: 15},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := plan.RenderCustomScript()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"$SERVICE", "$TARGET_IMAGE", "$ENV_FILE", "nori.service=\"$SERVICE\""} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("script missing %q:\n%s", want, script)
+		}
+	}
+	if strings.Contains(script, "top-secret") || strings.Contains(script, "set -x") {
+		t.Fatalf("unsafe script:\n%s", script)
+	}
+}
+
+func TestRenderPostgresCustomScriptMaterializesDatabaseBeforeApp(t *testing.T) {
+	plan, err := BuildPlan(Input{
+		ServiceID: 8, ServiceName: "api", TargetImage: "example/api@sha256:abc",
+		Config: Config{
+			Mode: ModePostgres, Version: 1, InternalPort: 8080, RestartPolicy: RestartAlways,
+			Health: HealthCheck{Command: "true", TimeoutSeconds: 15},
+			Postgres: &PostgresConfig{
+				Image: "postgres:16.4", Database: "api", User: "api",
+				PasswordEnv: "POSTGRES_PASSWORD", ConnectionURLEnv: "DATABASE_URL", ReadyTimeoutSeconds: 30,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := plan.RenderCustomScript()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"nori-8-postgres", "POSTGRES_PASSWORD", "nori-8-db-internal", "docker pull \"postgres:16.4\""} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("script missing %q:\n%s", want, script)
+		}
+	}
+	if strings.Index(script, "docker pull \"postgres:16.4\"") > strings.Index(script, "nori-8-postgres") {
+		t.Fatalf("database must be pulled before it is created:\n%s", script)
+	}
+}
