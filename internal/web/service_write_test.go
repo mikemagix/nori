@@ -44,6 +44,30 @@ func TestSaveOrdinaryServiceSharesDashboardAndTemplateWrites(t *testing.T) {
 	}
 }
 
+func TestServiceCreateDuplicateNameExplainsConflictAndPreservesEnvironment(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "nori.db"), make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	existing := &store.Service{Name: "app", WatchedImage: "nginx:latest", Policy: store.PolicyManual, DeployScript: "true"}
+	if _, err := (&Server{store: st}).saveOrdinaryService(context.Background(), ordinaryWrite{Service: existing, EnvironmentMode: dashboardEnvironment}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/services", strings.NewReader("name=app&watched_image=nginx%3Alatest&policy=manual&deploy_script=true&env_file=TOKEN%3Dtyped%0A"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	(&Server{store: st}).handleServiceCreate(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if body := rr.Body.String(); !strings.Contains(body, "already exists") || !strings.Contains(body, "TOKEN=typed") {
+		t.Fatalf("duplicate response should explain the name conflict and preserve environment: %s", body)
+	}
+}
+
 func TestServiceUpdateRejectsStaleGenerationWithoutRenderingSubmittedEnvironment(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "nori.db"), make([]byte, 32))
 	if err != nil {

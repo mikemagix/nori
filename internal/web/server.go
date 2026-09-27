@@ -451,7 +451,10 @@ func (s *Server) handleServiceCreate(w http.ResponseWriter, r *http.Request) {
 			_ = ServiceFormPage(form, s.csrf(r), false, "/services", validationErr.Error()).Render(r.Context(), w)
 			return
 		}
-		form.EnvFile = ""
+		if _, lookupErr := s.store.GetServiceByName(r.Context(), svc.Name); lookupErr == nil {
+			_ = ServiceFormPage(form, s.csrf(r), false, "/services", "A service with that name already exists.").Render(r.Context(), w)
+			return
+		}
 		_ = ServiceFormPage(form, s.csrf(r), false, "/services", "No changes were saved. Try again.").Render(r.Context(), w)
 		return
 	}
