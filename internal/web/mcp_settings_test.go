@@ -251,6 +251,28 @@ func TestMCPDestructiveSettingsMutationsRequireBoundedExactOrigin(t *testing.T) 
 	}
 }
 
+func TestMCPDestructiveSettingsMutationsAcceptDefaultPortEquivalence(t *testing.T) {
+	srv, st := mcpSettingsServer(t)
+	ctx := context.Background()
+	if err := st.SetMCPConfig(ctx, true, "https://nori.example:443", false); err != nil {
+		t.Fatal(err)
+	}
+	grant := seedManagedGrant(t, st, "client-one", "Calendar", "family-one")
+	cookies := loginCookies(t, srv)
+	settings := settingsRequest(t, srv, cookies, http.MethodGet, "https://nori.example/settings", "", "")
+	if settings.Code != http.StatusOK {
+		t.Fatalf("settings = %d: %s", settings.Code, settings.Body)
+	}
+	body := url.Values{"csrf_token": {csrfFromBody(settings.Body.String())}, "decision": {"revoke"}}.Encode()
+	revoked := settingsRequest(t, srv, cookies, http.MethodPost, "https://nori.example/settings/mcp/grants/"+grant.ManagementID+"/revoke", body, "https://nori.example")
+	if revoked.Code != http.StatusSeeOther {
+		t.Fatalf("default-port revoke = %d: %s", revoked.Code, revoked.Body)
+	}
+	if _, err := st.GetOAuthGrantManagement(ctx, grant.ManagementID); err == nil {
+		t.Fatal("default-port revoke left selected grant active")
+	}
+}
+
 func TestMCPGrantManagementUncertainResultIsAnnounced(t *testing.T) {
 	var body bytes.Buffer
 	if err := SettingsPage("Nori", "csrf", "", false, store.MCPConfig{Enabled: true}, mcpSettingsView{GrantError: "Could not confirm that the connection was revoked. It may still be active."}, Channels{}, nil).Render(context.Background(), &body); err != nil {

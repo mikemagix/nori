@@ -7,6 +7,8 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -73,8 +75,9 @@ func New(st *store.Store, a *auth.Auth) *Server { return &Server{st: st, auth: a
 // ListOAuthGrantManagement exposes only Store's browser-safe management
 // projection to Settings. It deliberately does not expose generic OAuth rows,
 // whose serialized payloads include credentials and protocol-private context.
-// Existing families are not reconstructed here: a live refresh record can
-// contain a narrowed scope, so it cannot prove the originally approved scope.
+// Legacy families are reconstructed from live code or refresh records. A
+// refresh family may contain narrowed scopes, so all of its live refresh
+// records must be considered before rebuilding the management projection.
 func (s *Server) ListOAuthGrantManagement(ctx context.Context) ([]store.OAuthRegistration, error) {
 	if err := s.bootstrapOAuthGrantManagement(ctx); err != nil {
 		return nil, err
@@ -94,29 +97,76 @@ func (s *Server) bootstrapOAuthGrantManagement(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	for _, code := range codes {
-		var g grant
-		if json.Unmarshal(code.Data, &g) != nil || g.ClientID == "" || g.Scope == "" || g.Family == "" || g.Family != code.Family || g.Epoch != config.Epoch || g.Resource != config.PublicURL+"/mcp" || g.FamilyExpires <= time.Now().Unix() {
-			continue
-		}
+	bootstrap := func(g grant, approvedAt time.Time, scopes string) error {
 		clientRecord, err := s.st.GetOAuth(ctx, digest(g.ClientID), "client")
 		if err != nil {
-			continue
+			return nil
 		}
 		var client storedClient
 		if json.Unmarshal(clientRecord.Data, &client) != nil || client.Client.Name == "" || client.Epoch != config.Epoch || clientRecord.Used {
-			continue
+			return nil
 		}
 		err = s.st.BootstrapOAuthGrant(ctx, store.OAuthGrantBootstrap{
 			ClientKey:       digest(g.ClientID),
 			ClientName:      client.Client.Name,
 			ClientExpiresAt: time.Unix(clientRecord.Expires, 0),
-			ApprovedAt:      time.Unix(code.Expires, 0).Add(-authorizationCodeLifetime),
+			ApprovedAt:      approvedAt,
 			Family:          g.Family,
 			FamilyExpiresAt: time.Unix(g.FamilyExpires, 0),
-			Scopes:          g.Scope,
+			Scopes:          scopes,
 		})
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		return nil
+	}
+	now := time.Now().Unix()
+	for _, code := range codes {
+		var g grant
+		if json.Unmarshal(code.Data, &g) != nil || g.ClientID == "" || g.Scope == "" || g.Family == "" || g.Family != code.Family || g.Epoch != config.Epoch || g.Resource != config.PublicURL+"/mcp" || g.FamilyExpires <= now {
+			continue
+		}
+		if err := bootstrap(g, time.Unix(code.Expires, 0).Add(-authorizationCodeLifetime), g.Scope); err != nil {
+			return err
+		}
+	}
+	refreshes, err := s.st.ListOAuthRecords(ctx, "refresh")
+	if err != nil {
+		return err
+	}
+	type refreshFamily struct {
+		grant  grant
+		scopes map[string]struct{}
+	}
+	families := make(map[string]refreshFamily)
+	for _, refresh := range refreshes {
+		var g grant
+		if json.Unmarshal(refresh.Data, &g) != nil || g.ClientID == "" || g.Scope == "" || g.Family == "" || g.Family != refresh.Family || g.Epoch != config.Epoch || g.Resource != config.PublicURL+"/mcp" || g.FamilyExpires <= now {
+			continue
+		}
+		family := families[g.Family]
+		if family.grant.Family == "" {
+			family.grant = g
+			family.scopes = make(map[string]struct{})
+		}
+		for _, scope := range strings.Fields(g.Scope) {
+			family.scopes[scope] = struct{}{}
+		}
+		families[g.Family] = family
+	}
+	familyNames := make([]string, 0, len(families))
+	for family := range families {
+		familyNames = append(familyNames, family)
+	}
+	sort.Strings(familyNames)
+	for _, familyName := range familyNames {
+		family := families[familyName]
+		scopes := make([]string, 0, len(family.scopes))
+		for scope := range family.scopes {
+			scopes = append(scopes, scope)
+		}
+		sort.Strings(scopes)
+		if err := bootstrap(family.grant, time.Unix(family.grant.FamilyExpires, 0).Add(-grantLifetime), strings.Join(scopes, " ")); err != nil {
 			return err
 		}
 	}

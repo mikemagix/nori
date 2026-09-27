@@ -518,6 +518,53 @@ func TestListOAuthGrantManagementBootstrapsLiveCodeGrant(t *testing.T) {
 	}
 }
 
+func TestListOAuthGrantManagementBootstrapsLiveRefreshGrant(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.SetMCPConfig(ctx, true, "https://nori.example", false); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := st.GetMCPConfig(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(st, nil)
+	now := time.Now().Truncate(time.Second)
+	cl := storedClient{Client: client{ID: "legacy-client", Name: "Legacy client", Method: "none"}, Epoch: cfg.Epoch}
+	if err := s.put(ctx, cl.Client.ID, "client", "", now.Add(approvedClientLifetime), cl); err != nil {
+		t.Fatal(err)
+	}
+	g := grant{ClientID: cl.Client.ID, Resource: cfg.PublicURL + "/mcp", Epoch: cfg.Epoch, Family: "legacy-family", FamilyExpires: now.Add(grantLifetime).Unix()}
+	for _, record := range []struct {
+		key   string
+		scope string
+	}{
+		{key: "legacy-refresh-read", scope: ScopeRead},
+		{key: "legacy-refresh-write", scope: ScopeWrite},
+	} {
+		g.Scope = record.scope
+		if err := s.put(ctx, record.key, "refresh", g.Family, time.Unix(g.FamilyExpires, 0), g); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	registrations, err := s.ListOAuthGrantManagement(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(registrations) != 1 || registrations[0].ClientName != "Legacy client" || len(registrations[0].Grants) != 1 {
+		t.Fatalf("legacy refresh management projection = %+v", registrations)
+	}
+	managed := registrations[0].Grants[0]
+	if managed.Scopes != ScopeRead+" "+ScopeWrite || managed.Status != store.OAuthGrantActive {
+		t.Fatalf("legacy refresh managed grant = %+v", managed)
+	}
+}
+
 func TestRedirectValidation(t *testing.T) {
 	for _, v := range []string{"https://example.com/callback", "http://localhost", "http://localhost:8765/callback", "http://127.0.0.1:123/cb", "http://[::1]:123/cb"} {
 		if !validRedirect(v) {

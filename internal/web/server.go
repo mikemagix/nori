@@ -157,7 +157,7 @@ func (s *Server) mcpSecureCookies(next http.Handler) http.Handler {
 		cfg, err := s.store.GetMCPConfig(r.Context())
 		if err == nil && cfg.PublicURL != "" {
 			u, err := url.Parse(cfg.PublicURL)
-			if err == nil && u.Scheme == "https" && u.Host == r.Host {
+			if err == nil && u.Scheme == "https" && sameOriginHost(u, r.Host) {
 				r = r.WithContext(auth.WithSecureCookies(r.Context()))
 			}
 		}
@@ -199,7 +199,7 @@ func (s *Server) mcpSettingsOrigin(next http.Handler) http.Handler {
 			return
 		}
 		configured, err := url.Parse(cfg.PublicURL)
-		if err != nil || configured.Scheme == "" || configured.Host == "" || r.Host != configured.Host {
+		if err != nil || configured.Scheme == "" || configured.Host == "" || !sameOriginHost(configured, r.Host) {
 			http.Error(w, "invalid settings origin", http.StatusForbidden)
 			return
 		}
@@ -209,12 +209,37 @@ func (s *Server) mcpSettingsOrigin(next http.Handler) http.Handler {
 			return
 		}
 		origin, err := url.Parse(origins[0])
-		if err != nil || origin.Scheme != configured.Scheme || origin.Host != configured.Host || origin.User != nil || origin.Path != "" || origin.RawPath != "" || origin.RawQuery != "" || origin.Fragment != "" {
+		if err != nil || !sameOriginURL(configured, origin) || origin.User != nil || origin.Path != "" || origin.RawPath != "" || origin.RawQuery != "" || origin.Fragment != "" {
 			http.Error(w, "invalid settings origin", http.StatusForbidden)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func sameOriginHost(configured *url.URL, requestHost string) bool {
+	request, err := url.Parse(configured.Scheme + "://" + requestHost)
+	return err == nil && request.User == nil && request.Host != "" && sameOriginURL(configured, request)
+}
+
+func sameOriginURL(left, right *url.URL) bool {
+	if !strings.EqualFold(left.Scheme, right.Scheme) || !strings.EqualFold(left.Hostname(), right.Hostname()) {
+		return false
+	}
+	return effectivePort(left) == effectivePort(right)
+}
+
+func effectivePort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+	if strings.EqualFold(u.Scheme, "https") {
+		return "443"
+	}
+	if strings.EqualFold(u.Scheme, "http") {
+		return "80"
+	}
+	return ""
 }
 
 type mcpSettingsView struct {
