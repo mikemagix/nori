@@ -11,16 +11,17 @@ const (
 )
 
 type Service struct {
-	ID           int64
-	Name         string
-	WatchedImage string
-	Policy       Policy
-	CronExpr     string
-	DeployScript string
-	IsSelf       bool
-	HealthURL    string
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID            int64
+	Name          string
+	WatchedImage  string
+	Policy        Policy
+	CronExpr      string
+	DeployScript  string
+	IsSelf        bool
+	HealthURL     string
+	ConfigVersion int64
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
 type EnvVar struct {

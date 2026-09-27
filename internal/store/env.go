@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 	"nori/internal/crypto"
@@ -21,6 +22,9 @@ func (s *Store) SetEnvFile(ctx context.Context, serviceID int64, content string)
 	if err := s.writeEnvFile(ctx, tx, serviceID, content); err != nil {
 		return err
 	}
+	if err := advanceConfigVersion(ctx, tx, serviceID); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -31,9 +35,24 @@ func (s *Store) SetEnvTemplate(ctx context.Context, serviceID int64, template st
 	})
 }
 
+// SetEnvTemplateAtVersion changes declared keys only when the client still
+// holds the current service configuration generation.
+func (s *Store) SetEnvTemplateAtVersion(ctx context.Context, serviceID, expectedVersion int64, template string) (int64, error) {
+	return s.updateEnvFileAtVersion(ctx, serviceID, expectedVersion, func(current string) (string, error) {
+		return envfile.ResolveTemplate(current, template)
+	})
+}
+
 // SetEnvSecret is write-only and cannot introduce an undeclared variable.
 func (s *Store) SetEnvSecret(ctx context.Context, serviceID int64, key, value string) error {
 	return s.updateEnvFile(ctx, serviceID, func(current string) (string, error) {
+		return envfile.SetValue(current, key, value)
+	})
+}
+
+// SetEnvSecretAtVersion is write-only and refuses a stale client snapshot.
+func (s *Store) SetEnvSecretAtVersion(ctx context.Context, serviceID, expectedVersion int64, key, value string) (int64, error) {
+	return s.updateEnvFileAtVersion(ctx, serviceID, expectedVersion, func(current string) (string, error) {
 		return envfile.SetValue(current, key, value)
 	})
 }
@@ -55,7 +74,36 @@ func (s *Store) updateEnvFile(ctx context.Context, serviceID int64, update func(
 	if err := s.writeEnvFile(ctx, tx, serviceID, content); err != nil {
 		return err
 	}
+	if err := advanceConfigVersion(ctx, tx, serviceID); err != nil {
+		return err
+	}
 	return tx.Commit()
+}
+
+func (s *Store) updateEnvFileAtVersion(ctx context.Context, serviceID, expectedVersion int64, update func(string) (string, error)) (int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	if err := advanceConfigVersionAt(ctx, tx, serviceID, expectedVersion); err != nil {
+		return 0, err
+	}
+	current, err := s.getEnvFile(ctx, tx, serviceID)
+	if err != nil {
+		return 0, err
+	}
+	content, err := update(current)
+	if err != nil {
+		return 0, err
+	}
+	if err := s.writeEnvFile(ctx, tx, serviceID, content); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return expectedVersion + 1, nil
 }
 
 func (s *Store) writeEnvFile(ctx context.Context, tx *sql.Tx, serviceID int64, content string) error {
@@ -167,7 +215,40 @@ func (s *Store) SetEnvVar(ctx context.Context, ev *EnvVar) error {
 	if err := s.recordEnvRevision(ctx, tx, ev.ServiceID, content); err != nil {
 		return err
 	}
+	if err := advanceConfigVersion(ctx, tx, ev.ServiceID); err != nil {
+		return err
+	}
 	return tx.Commit()
+}
+
+func advanceConfigVersion(ctx context.Context, tx *sql.Tx, serviceID int64) error {
+	res, err := tx.ExecContext(ctx, `UPDATE service SET config_version=config_version+1, updated_at=? WHERE id=?`, time.Now().UTC().Unix(), serviceID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return ErrServiceConflict
+	}
+	return nil
+}
+
+func advanceConfigVersionAt(ctx context.Context, tx *sql.Tx, serviceID, expectedVersion int64) error {
+	res, err := tx.ExecContext(ctx, `UPDATE service SET config_version=config_version+1, updated_at=? WHERE id=? AND config_version=?`, time.Now().UTC().Unix(), serviceID, expectedVersion)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return ErrServiceConflict
+	}
+	return nil
 }
 
 func (s *Store) ListEnvVars(ctx context.Context, serviceID int64) ([]*EnvVar, error) {
