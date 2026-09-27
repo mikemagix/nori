@@ -43,6 +43,20 @@ type ManagedContainer struct {
 	State string
 }
 
+// ManagedProbe runs a bounded, non-interactive command inside a managed
+// container. It keeps the executor on a narrow, typed Docker surface rather
+// than exposing arbitrary Docker commands through the dashboard or MCP.
+type ManagedProbe struct {
+	Container string
+	Command   string
+	// Image and Network create a short-lived probe container. They are used
+	// for cross-network database readiness rather than executing inside the
+	// database container itself.
+	Image   string
+	Network string
+	Env     []string
+}
+
 // ManagedClient adds only the operations required by Nori's managed templates.
 // It intentionally does not expose a general Docker command primitive.
 type ManagedClient interface {
@@ -53,8 +67,11 @@ type ManagedClient interface {
 	StopContainer(context.Context, string) error
 	RemoveContainer(context.Context, string) error
 	RenameContainer(context.Context, string, string) error
+	InspectNetwork(context.Context, string) (ManagedResource, error)
+	InspectVolume(context.Context, string) (ManagedResource, error)
 	EnsureNetwork(context.Context, ManagedResource) error
 	EnsureVolume(context.Context, ManagedResource) error
+	RunProbe(context.Context, ManagedProbe) error
 }
 
 func (f *Fake) managedFailure() error {
@@ -157,6 +174,30 @@ func (f *Fake) RenameContainer(_ context.Context, oldName, newName string) error
 	return nil
 }
 
+func (f *Fake) InspectNetwork(_ context.Context, name string) (ManagedResource, error) {
+	if err := f.managedFailure(); err != nil {
+		return ManagedResource{}, err
+	}
+	f.Operations = append(f.Operations, "inspect network "+name)
+	resource, ok := f.Networks[name]
+	if !ok {
+		return ManagedResource{}, fmt.Errorf("%w: network %s", ErrManagedNotFound, name)
+	}
+	return cloneResource(resource), nil
+}
+
+func (f *Fake) InspectVolume(_ context.Context, name string) (ManagedResource, error) {
+	if err := f.managedFailure(); err != nil {
+		return ManagedResource{}, err
+	}
+	f.Operations = append(f.Operations, "inspect volume "+name)
+	resource, ok := f.Volumes[name]
+	if !ok {
+		return ManagedResource{}, fmt.Errorf("%w: volume %s", ErrManagedNotFound, name)
+	}
+	return cloneResource(resource), nil
+}
+
 func (f *Fake) EnsureNetwork(_ context.Context, want ManagedResource) error {
 	if err := f.managedFailure(); err != nil {
 		return err
@@ -187,6 +228,18 @@ func (f *Fake) EnsureVolume(_ context.Context, want ManagedResource) error {
 	f.Operations = append(f.Operations, "create volume "+want.Name)
 	f.Volumes[want.Name] = cloneResource(want)
 	return nil
+}
+
+func (f *Fake) RunProbe(_ context.Context, probe ManagedProbe) error {
+	if err := f.managedFailure(); err != nil {
+		return err
+	}
+	if probe.Network != "" {
+		f.Operations = append(f.Operations, "probe network "+probe.Network)
+	} else {
+		f.Operations = append(f.Operations, "probe container "+probe.Container)
+	}
+	return f.HealthErr
 }
 
 func checkOwnership(got, want ManagedResource) error {

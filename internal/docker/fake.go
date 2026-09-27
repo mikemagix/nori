@@ -16,6 +16,7 @@ type Fake struct {
 	Volumes           map[string]ManagedResource
 	Operations        []string
 	ManagedErr        error
+	HealthErr         error
 }
 
 func (f *Fake) ListByService(ctx context.Context, service string) ([]Container, error) {

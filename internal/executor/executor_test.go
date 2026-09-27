@@ -6,11 +6,13 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"nori/internal/docker"
 	"nori/internal/notify"
 	"nori/internal/store"
 )
@@ -403,6 +405,207 @@ func TestDeploy_SelfHandoffFailureIsFinalized(t *testing.T) {
 	if d.Status != store.DeployFailed || d.FinishedAt == nil {
 		t.Fatalf("failed self handoff was not finalized: %+v", d)
 	}
+}
+
+func TestDeploy_TemplatePromotesHealthyCandidateWithoutRunningCustomScript(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	svc := &store.Service{
+		Name:           "api",
+		WatchedImage:   "ghcr.io/acme/api:latest",
+		Policy:         store.PolicyManual,
+		DeploymentMode: store.DeploymentModeSingleContainer,
+		TemplateConfig: `{"version":1,"internal_port":8080,"restart_policy":"always","serving_network":"proxy","health":{"command":"true","timeout_seconds":5}}`,
+	}
+	if err := st.CreateService(ctx, svc); err != nil {
+		t.Fatal(err)
+	}
+
+	dk := &docker.Fake{Networks: map[string]docker.ManagedResource{"proxy": {Name: "proxy"}}}
+	runner := &fakeRunner{}
+	ex := New(st, runner, func(context.Context, string) (string, error) { return "sha256:new", nil }, 0)
+	ex.SetDocker(dk)
+
+	id, err := ex.Deploy(ctx, svc.ID, store.TriggerManual)
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	deployment := waitForDeployment(t, st, id)
+	if deployment.Status != store.DeploySuccess {
+		t.Fatalf("template deployment status = %s, log = %q", deployment.Status, deployment.Log)
+	}
+	if runner.called {
+		t.Fatal("template deployment must not execute the custom Bash runner")
+	}
+	if _, ok := dk.ManagedContainers["nori-"+strconv.FormatInt(svc.ID, 10)+"-app"]; !ok {
+		t.Fatalf("promoted application container missing: %+v", dk.ManagedContainers)
+	}
+	if _, ok := dk.ManagedContainers["nori-"+strconv.FormatInt(svc.ID, 10)+"-app-candidate"]; ok {
+		t.Fatalf("candidate must be renamed after health succeeds: %+v", dk.ManagedContainers)
+	}
+	if len(dk.Operations) == 0 || dk.Operations[0] != "pull ghcr.io/acme/api@sha256:new" {
+		t.Fatalf("image must be pulled before resource changes, operations = %v", dk.Operations)
+	}
+}
+
+func TestDeploy_TemplateHealthFailureRemovesCandidateAndKeepsCurrentApp(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	svc := &store.Service{
+		Name:           "api",
+		WatchedImage:   "ghcr.io/acme/api:latest",
+		Policy:         store.PolicyManual,
+		DeploymentMode: store.DeploymentModeSingleContainer,
+		TemplateConfig: `{"version":1,"internal_port":8080,"restart_policy":"always","health":{"command":"false","timeout_seconds":5}}`,
+	}
+	if err := st.CreateService(ctx, svc); err != nil {
+		t.Fatal(err)
+	}
+	labels := map[string]string{
+		"nori.service": "api", "nori.template": "1", "nori.service-id": strconv.FormatInt(svc.ID, 10), "nori.role": "app",
+	}
+	current := "nori-" + strconv.FormatInt(svc.ID, 10) + "-app"
+	dk := &docker.Fake{
+		ManagedContainers: map[string]docker.ManagedContainer{current: {ManagedContainerSpec: docker.ManagedContainerSpec{Name: current, Labels: labels}, State: "running"}},
+		HealthErr:         errors.New("application health check failed"),
+	}
+	ex := New(st, &fakeRunner{}, func(context.Context, string) (string, error) { return "sha256:new", nil }, 0)
+	ex.SetDocker(dk)
+
+	id, err := ex.Deploy(ctx, svc.ID, store.TriggerManual)
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	deployment := waitForDeployment(t, st, id)
+	if deployment.Status != store.DeployFailed {
+		t.Fatalf("template deployment status = %s, log = %q", deployment.Status, deployment.Log)
+	}
+	if got := dk.ManagedContainers[current].State; got != "running" {
+		t.Fatalf("current application state = %q, want running", got)
+	}
+	if _, ok := dk.ManagedContainers["nori-"+strconv.FormatInt(svc.ID, 10)+"-app-candidate"]; ok {
+		t.Fatalf("failed candidate must be removed: %+v", dk.ManagedContainers)
+	}
+}
+
+func TestDeploy_PostgresTemplateReusesOwnedDatabaseAndRecordsIdentity(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	svc := &store.Service{
+		Name:           "api",
+		WatchedImage:   "ghcr.io/acme/api:latest",
+		Policy:         store.PolicyManual,
+		DeploymentMode: store.DeploymentModePostgres,
+		TemplateConfig: `{"version":1,"internal_port":8080,"restart_policy":"always","health":{"command":"true","timeout_seconds":5},"postgres":{"image":"postgres:16.4","database":"api","user":"api","password_env":"POSTGRES_PASSWORD","connection_url_env":"DATABASE_URL","ready_timeout_seconds":5}}`,
+	}
+	if err := st.CreateService(ctx, svc); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetEnvFile(ctx, svc.ID, "POSTGRES_DB=api\nPOSTGRES_USER=api\nPOSTGRES_PASSWORD=s3cret\nDATABASE_URL=postgres://api:s3cret@nori-1-postgres/api?sslmode=disable\n"); err != nil {
+		t.Fatal(err)
+	}
+	dk := &docker.Fake{}
+	ex := New(st, &fakeRunner{}, func(context.Context, string) (string, error) { return "sha256:new", nil }, 0)
+	ex.SetDocker(dk)
+
+	firstID, err := ex.Deploy(ctx, svc.ID, store.TriggerManual)
+	if err != nil {
+		t.Fatalf("first Deploy: %v", err)
+	}
+	if deployment := waitForDeployment(t, st, firstID); deployment.Status != store.DeploySuccess {
+		t.Fatalf("first deployment status = %s, log = %q", deployment.Status, deployment.Log)
+	}
+	state, err := st.GetTemplateState(ctx, svc.ID)
+	if err != nil || state.DatabaseIdentityFingerprint == "" {
+		t.Fatalf("managed database identity = %+v, %v", state, err)
+	}
+	databaseName := "nori-" + strconv.FormatInt(svc.ID, 10) + "-postgres"
+	if got := dk.ManagedContainers[databaseName].State; got != "running" {
+		t.Fatalf("database state = %q, want running", got)
+	}
+	if !containsOperation(dk.Operations, "probe network nori-"+strconv.FormatInt(svc.ID, 10)+"-db-internal") {
+		t.Fatalf("database readiness must run across the private network, operations = %v", dk.Operations)
+	}
+
+	secondID, err := ex.Deploy(ctx, svc.ID, store.TriggerManual)
+	if err != nil {
+		t.Fatalf("second Deploy: %v", err)
+	}
+	if deployment := waitForDeployment(t, st, secondID); deployment.Status != store.DeploySuccess {
+		t.Fatalf("second deployment status = %s, log = %q", deployment.Status, deployment.Log)
+	}
+	if got := dk.ManagedContainers[databaseName].State; got != "running" {
+		t.Fatalf("database must remain running across application redeploy, got %q", got)
+	}
+}
+
+func TestDeploy_PostgresReadinessFailureKeepsCurrentAppAndRedactsSecrets(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	svc := &store.Service{
+		Name:           "api",
+		WatchedImage:   "ghcr.io/acme/api:latest",
+		Policy:         store.PolicyManual,
+		DeploymentMode: store.DeploymentModePostgres,
+		TemplateConfig: `{"version":1,"internal_port":8080,"restart_policy":"always","health":{"command":"true","timeout_seconds":5},"postgres":{"image":"postgres:16.4","database":"api","user":"api","password_env":"POSTGRES_PASSWORD","connection_url_env":"DATABASE_URL","ready_timeout_seconds":5}}`,
+	}
+	if err := st.CreateService(ctx, svc); err != nil {
+		t.Fatal(err)
+	}
+	secret := "s3cret"
+	if err := st.SetEnvFile(ctx, svc.ID, "POSTGRES_DB=api\nPOSTGRES_USER=api\nPOSTGRES_PASSWORD="+secret+"\nDATABASE_URL=postgres://api:"+secret+"@nori-1-postgres/api?sslmode=disable\n"); err != nil {
+		t.Fatal(err)
+	}
+	current := "nori-" + strconv.FormatInt(svc.ID, 10) + "-app"
+	dk := &docker.Fake{
+		ManagedContainers: map[string]docker.ManagedContainer{current: {ManagedContainerSpec: docker.ManagedContainerSpec{
+			Name: current, Labels: map[string]string{"nori.service": "api", "nori.template": "1", "nori.service-id": strconv.FormatInt(svc.ID, 10), "nori.role": "app"},
+		}, State: "running"}},
+		HealthErr: errors.New("authentication failed for password " + secret),
+	}
+	ex := New(st, &fakeRunner{}, func(context.Context, string) (string, error) { return "sha256:new", nil }, 0)
+	ex.SetDocker(dk)
+
+	id, err := ex.Deploy(ctx, svc.ID, store.TriggerManual)
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	deployment := waitForDeployment(t, st, id)
+	if deployment.Status != store.DeployFailed {
+		t.Fatalf("deployment status = %s, log = %q", deployment.Status, deployment.Log)
+	}
+	if got := dk.ManagedContainers[current].State; got != "running" {
+		t.Fatalf("database readiness failure changed current application state to %q", got)
+	}
+	if strings.Contains(deployment.Log, secret) {
+		t.Fatalf("deployment log leaked database secret: %q", deployment.Log)
+	}
+}
+
+func containsOperation(operations []string, want string) bool {
+	for _, operation := range operations {
+		if operation == want {
+			return true
+		}
+	}
+	return false
+}
+
+func waitForDeployment(t *testing.T, st *store.Store, id int64) *store.Deployment {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		deployment, err := st.GetDeployment(context.Background(), id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if deployment.Status != store.DeployRunning {
+			return deployment
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("deployment did not finish")
+	return nil
 }
 
 // capturingNotifier records every notification event it receives.

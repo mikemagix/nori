@@ -116,9 +116,11 @@ type Plan struct {
 	AppCandidate    Resource
 	AppRollback     Resource
 	Database        *Resource
+	Postgres        *PostgresConfig
 	InternalNetwork *Resource
 	Volumes         []Resource
 	ExternalNetwork string
+	Proxy           *ProxyConfig
 	Health          HealthCheck
 	Actions         []Action
 }
@@ -166,7 +168,7 @@ func (c Config) Validate() error {
 	if c.ServingNetwork != "" && !validResourceName(c.ServingNetwork) {
 		return fmt.Errorf("invalid serving network %q", c.ServingNetwork)
 	}
-	if err := c.Proxy.validate(c.ServingNetwork); err != nil {
+	if err := c.Proxy.validate(c.ServingNetwork, c.InternalPort); err != nil {
 		return err
 	}
 	seenNames := map[string]bool{}
@@ -196,7 +198,7 @@ func (c Config) Validate() error {
 	return c.Health.validate("application")
 }
 
-func (p *ProxyConfig) validate(servingNetwork string) error {
+func (p *ProxyConfig) validate(servingNetwork string, internalPort int) error {
 	if p == nil {
 		return nil
 	}
@@ -208,6 +210,9 @@ func (p *ProxyConfig) validate(servingNetwork string) error {
 	}
 	if servingNetwork != "" && servingNetwork != p.Network {
 		return errors.New("serving network and proxy network must match")
+	}
+	if p.Port != internalPort {
+		return errors.New("proxy port must match the internal application port")
 	}
 	if strings.ContainsAny(p.Domain, "/:@") {
 		return fmt.Errorf("invalid proxy domain %q", p.Domain)
@@ -224,7 +229,7 @@ func (h HealthCheck) validate(subject string) error {
 	}
 	if h.URL != "" {
 		u, err := url.Parse(h.URL)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil {
 			return fmt.Errorf("invalid health URL %q", h.URL)
 		}
 	}
@@ -290,6 +295,10 @@ func BuildPlan(in Input) (Plan, error) {
 		return Plan{}, err
 	}
 	plan := Plan{Mode: in.Config.Mode, ServiceID: in.ServiceID, ServiceName: in.ServiceName, TargetImage: in.TargetImage, Health: in.Config.Health}
+	if in.Config.Proxy != nil {
+		proxy := *in.Config.Proxy
+		plan.Proxy = &proxy
+	}
 	if in.Config.Mode == ModeCustom {
 		plan.Actions = []Action{{Phase: "custom", Description: "Run the operator-managed Custom deployment script"}}
 		return plan, nil
@@ -329,6 +338,8 @@ func BuildPlan(in Input) (Plan, error) {
 		db.Networks = []string{internal.Name}
 		db.EnvKeys = []string{"POSTGRES_DB", "POSTGRES_USER", in.Config.Postgres.PasswordEnv}
 		plan.Database = &db
+		postgres := *in.Config.Postgres
+		plan.Postgres = &postgres
 		plan.Actions = append(plan.Actions,
 			Action{Phase: "preflight", Description: "Pull " + db.Image},
 			Action{Phase: "preflight", Description: "Verify ownership and ensure private network " + internal.Name},
