@@ -19,7 +19,7 @@ type Service struct {
 	DeployScript  string
 	IsSelf        bool
 	HealthURL     string
-	ConfigVersion int64
+	ConfigVersion int64 `json:"config_version"`
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 }

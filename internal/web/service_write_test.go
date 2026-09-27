@@ -1,0 +1,154 @@
+package web
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/go-chi/chi/v5"
+	"nori/internal/store"
+)
+
+func TestSaveOrdinaryServiceSharesDashboardAndTemplateWrites(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "nori.db"), make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	server := &Server{store: st}
+	ctx := context.Background()
+
+	dashboardEnv := "TOKEN=first\n"
+	svc := &store.Service{Name: "app", WatchedImage: "nginx:latest", Policy: store.PolicyManual, DeployScript: "true"}
+	if _, err := server.saveOrdinaryService(ctx, ordinaryWrite{Service: svc, Environment: &dashboardEnv, EnvironmentMode: dashboardEnvironment}); err != nil {
+		t.Fatal(err)
+	}
+	previous := *svc
+	template := "TOKEN='[REDACTED]'\n"
+	svc.DeployScript = "echo updated"
+	if _, err := server.saveOrdinaryService(ctx, ordinaryWrite{Service: svc, Previous: &previous, Environment: &template, EnvironmentMode: templateEnvironment}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.GetEnvFile(ctx, svc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "TOKEN=\"first\"\n" {
+		t.Fatalf("template write changed preserved secret: %q", got)
+	}
+}
+
+func TestServiceUpdateRejectsStaleGenerationWithoutRenderingSubmittedEnvironment(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "nori.db"), make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	svc := &store.Service{Name: "app", WatchedImage: "nginx:latest", Policy: store.PolicyManual, DeployScript: "true"}
+	env := "TOKEN=current\n"
+	if err := st.SaveServiceConfig(ctx, svc, &env, nil); err != nil {
+		t.Fatal(err)
+	}
+	staleVersion := svc.ConfigVersion
+	newer := *svc
+	newer.DeployScript = "echo current"
+	if err := st.SaveServiceConfig(ctx, &newer, nil, svc); err != nil {
+		t.Fatal(err)
+	}
+
+	server := &Server{store: st}
+	body := "name=app&watched_image=nginx%3Alatest&policy=manual&deploy_script=echo+stale&env_file=TOKEN%3Dstale&expected_config_version=" + strconv.FormatInt(staleVersion, 10)
+	req := httptest.NewRequest(http.MethodPost, "/services/app", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("name", "app")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rr := httptest.NewRecorder()
+
+	server.handleServiceUpdate(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusConflict, rr.Body.String())
+	}
+	if body := rr.Body.String(); !strings.Contains(body, "Reload configuration") || strings.Contains(body, "TOKEN=stale") {
+		t.Fatalf("conflict response must offer reload without submitted environment: %s", body)
+	}
+}
+
+func TestCrossSurfaceWritersAllowOneGenerationWinner(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nori.db")
+	first, err := store.Open(path, make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = first.Close() })
+	second, err := store.Open(path, make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = second.Close() })
+	ctx := context.Background()
+	service := &store.Service{Name: "app", WatchedImage: "nginx:latest", Policy: store.PolicyManual, DeployScript: "true"}
+	if _, err := (&Server{store: first}).saveOrdinaryService(ctx, ordinaryWrite{Service: service, EnvironmentMode: dashboardEnvironment}); err != nil {
+		t.Fatal(err)
+	}
+	fromMCP, err := second.GetService(ctx, service.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dashboardCandidate := *service
+	dashboardCandidate.DeployScript = "echo dashboard"
+	mcpCandidate := *fromMCP
+	mcpCandidate.HealthURL = "https://example.com/health"
+	dashboardExpected := *service
+	mcpExpected := *fromMCP
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	var writers sync.WaitGroup
+	writers.Add(2)
+	go func() {
+		defer writers.Done()
+		<-start
+		_, err := (&Server{store: first}).saveOrdinaryService(ctx, ordinaryWrite{Service: &dashboardCandidate, Previous: &dashboardExpected, EnvironmentMode: dashboardEnvironment})
+		results <- err
+	}()
+	go func() {
+		defer writers.Done()
+		<-start
+		_, err := (&Server{store: second}).saveOrdinaryService(ctx, ordinaryWrite{Service: &mcpCandidate, Previous: &mcpExpected, EnvironmentMode: templateEnvironment})
+		results <- err
+	}()
+	close(start)
+	writers.Wait()
+	close(results)
+
+	successes, conflicts := 0, 0
+	for err := range results {
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, store.ErrServiceConflict):
+			conflicts++
+		default:
+			t.Fatalf("writer error = %v", err)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("writers: %d successes, %d conflicts; want one of each", successes, conflicts)
+	}
+	got, err := first.GetService(ctx, service.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ConfigVersion != 2 {
+		t.Fatalf("final config version = %d, want 2", got.ConfigVersion)
+	}
+}

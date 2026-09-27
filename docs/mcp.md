@@ -102,23 +102,27 @@ When verifying changes to this page:
 
 ## Persistence and concurrency
 
-`SaveServiceConfig` encrypts environment contents and commits configuration and
-environment together. Updates compare the configuration snapshot read by the
-operation against the current database fields. A mismatch aborts with
-`ErrServiceConflict`; neither configuration nor environment may partially save.
-This detects overlapping MCP mutations, not stale client-side drafts: the tool
-does not expose a client-supplied version token. MCP template saves resolve placeholders against the current encrypted
-values within that transaction. Omitted environment fields are preserved;
-omitted keys in an explicitly supplied template are removed.
+Dashboard and MCP ordinary-service writes use the same validation and atomic
+store operation. A service read returns `config_version`; MCP clients must send
+that value as `expected_config_version` for every update, template replacement,
+and secret write. The store begins a short SQLite write transaction, advances
+the generation only when it matches the supplied value, and then writes service
+fields, encrypted environment contents, and revision history as one commit. A
+stale generation returns a fixed reload-and-retry result without a partial save;
+clients must read the service again rather than retrying the old command.
 
-The environment tools use transactional `SetEnvTemplate` / `SetEnvSecret`
-operations so they cannot restore an earlier service configuration or silently
-restore a stale secret value. Concurrent SQLite write conflicts fail without
-partial writes; clients can retry. Templates normalize dotenv syntax and omit
-comments; values are always quoted to retain leading zeros and literal dollars. Names and managed status are immutable through MCP.
-The existing dashboard still uses its older save/validation path; do not assume
-its writes have the same conflict protection. Unifying those paths is a
-separate follow-up below.
+MCP template saves resolve placeholders against the current encrypted values in
+that transaction. Omitted environment fields are preserved; omitted keys in an
+explicit template are removed. Templates normalize dotenv syntax and omit
+comments; values are always quoted to retain leading zeros and literal dollars.
+Literal secrets remain write-only. Names and managed status are immutable
+through MCP, and the launcher-managed Nori service remains unavailable to MCP
+mutation.
+
+The dashboard sends its hidden configuration generation with each ordinary edit
+and renders a non-secret reload action on conflict. The scheduler observes only
+committed store state, so failed and conflicted writes do not reset or trigger
+scheduled jobs.
 
 The scheduler reads only scheduled IDs, names and cron expressions once per
 second. It preserves unchanged entries, removes stale entries and rechecks a

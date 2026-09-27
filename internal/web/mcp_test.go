@@ -49,6 +49,22 @@ func TestMCPServiceLifecycleAndScopes(t *testing.T) {
 	}
 	call := func(name string, args map[string]any, wantError bool) *mcp.CallToolResult {
 		t.Helper()
+		if (name == "update_service" || name == "set_service_environment" || name == "set_service_secret") && args["expected_config_version"] == nil {
+			id, ok := args["service_id"].(int64)
+			if !ok {
+				t.Fatalf("%s service_id type = %T, want int64", name, args["service_id"])
+			}
+			svc, err := st.GetService(ctx, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			withVersion := make(map[string]any, len(args)+1)
+			for key, value := range args {
+				withVersion[key] = value
+			}
+			withVersion["expected_config_version"] = svc.ConfigVersion
+			args = withVersion
+		}
 		res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
 		if err != nil {
 			t.Fatal(err)
@@ -64,7 +80,13 @@ func TestMCPServiceLifecycleAndScopes(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := map[string]any{"service_id": svc.ID}
-	call("set_service_secret", map[string]any{"service_id": svc.ID, "key": "SECRET", "value": "unlisted"}, false)
+	staleVersion := svc.ConfigVersion
+	call("set_service_secret", map[string]any{"service_id": svc.ID, "expected_config_version": staleVersion, "key": "SECRET", "value": "unlisted"}, false)
+	stale := call("set_service_secret", map[string]any{"service_id": svc.ID, "expected_config_version": staleVersion, "key": "SECRET", "value": "must-not-appear"}, true)
+	staleData, _ := json.Marshal(stale)
+	if bytes.Contains(staleData, []byte("must-not-appear")) || !bytes.Contains(staleData, []byte("configuration changed")) {
+		t.Fatalf("stale MCP secret result = %s", staleData)
+	}
 	call("set_service_secret", map[string]any{"service_id": svc.ID, "key": "UNKNOWN", "value": "never-echo"}, true)
 	call("update_service", map[string]any{"service_id": svc.ID, "env_file": "SECRET=plaintext"}, true)
 	call("set_service_environment", map[string]any{"service_id": svc.ID, "env_file": "SECRET=plaintext"}, true)

@@ -11,6 +11,7 @@ import (
 	"nori/internal/launcher"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -61,7 +62,7 @@ func TestConfigHistoryAndCopyToNewService(t *testing.T) {
 	if saved != current {
 		t.Fatal("preview/copy mutated current configuration")
 	}
-	form := url.Values{"csrf_token": {csrfFromBody(edit)}, "name": {"history"}, "watched_image": {"nginx"}, "policy": {"manual"}, "deploy_script": {"echo current"}, "env_file": {env}}
+	form := url.Values{"csrf_token": {csrfFromBody(edit)}, "name": {"history"}, "watched_image": {"nginx"}, "policy": {"manual"}, "deploy_script": {"echo current"}, "env_file": {env}, "expected_config_version": {strconv.FormatInt(svc.ConfigVersion, 10)}}
 	postAuthed(t, srv, cookies, "/services/history", form.Encode())
 	versions, _ = st.ListConfigRevisions(ctx, svc.ID, "env")
 	if len(versions) != 3 {
