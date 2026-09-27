@@ -2,7 +2,9 @@
 package mcpauth
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"sync"
@@ -67,6 +69,71 @@ func (s *Server) allow(w http.ResponseWriter, key string, limit int) bool {
 }
 
 func New(st *store.Store, a *auth.Auth) *Server { return &Server{st: st, auth: a} }
+
+// ListOAuthGrantManagement exposes only Store's browser-safe management
+// projection to Settings. It deliberately does not expose generic OAuth rows,
+// whose serialized payloads include credentials and protocol-private context.
+// Existing families are not reconstructed here: a live refresh record can
+// contain a narrowed scope, so it cannot prove the originally approved scope.
+func (s *Server) ListOAuthGrantManagement(ctx context.Context) ([]store.OAuthRegistration, error) {
+	if err := s.bootstrapOAuthGrantManagement(ctx); err != nil {
+		return nil, err
+	}
+	return s.st.ListOAuthGrantManagement(ctx)
+}
+
+func (s *Server) bootstrapOAuthGrantManagement(ctx context.Context) error {
+	config, err := s.st.GetMCPConfig(ctx)
+	if err != nil {
+		return err
+	}
+	if !config.Enabled || config.Epoch == "" || config.PublicURL == "" {
+		return nil
+	}
+	codes, err := s.st.ListOAuthRecords(ctx, "code")
+	if err != nil {
+		return err
+	}
+	for _, code := range codes {
+		var g grant
+		if json.Unmarshal(code.Data, &g) != nil || g.ClientID == "" || g.Scope == "" || g.Family == "" || g.Family != code.Family || g.Epoch != config.Epoch || g.Resource != config.PublicURL+"/mcp" || g.FamilyExpires <= time.Now().Unix() {
+			continue
+		}
+		clientRecord, err := s.st.GetOAuth(ctx, digest(g.ClientID), "client")
+		if err != nil {
+			continue
+		}
+		var client storedClient
+		if json.Unmarshal(clientRecord.Data, &client) != nil || client.Client.Name == "" || client.Epoch != config.Epoch || clientRecord.Used {
+			continue
+		}
+		err = s.st.BootstrapOAuthGrant(ctx, store.OAuthGrantBootstrap{
+			ClientKey:       digest(g.ClientID),
+			ClientName:      client.Client.Name,
+			ClientExpiresAt: time.Unix(clientRecord.Expires, 0),
+			ApprovedAt:      time.Unix(code.Expires, 0).Add(-authorizationCodeLifetime),
+			Family:          g.Family,
+			FamilyExpiresAt: time.Unix(g.FamilyExpires, 0),
+			Scopes:          g.Scope,
+		})
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+	}
+	return nil
+}
+
+// GetOAuthGrantManagement resolves one opaque management ID to the safe data
+// needed for a Settings confirmation page.
+func (s *Server) GetOAuthGrantManagement(ctx context.Context, id string) (store.OAuthGrant, error) {
+	return s.st.GetOAuthGrantManagement(ctx, id)
+}
+
+// RevokeOAuthGrantManagement revokes exactly one active family selected by an
+// opaque management ID. The Store owns the transaction and family tombstone.
+func (s *Server) RevokeOAuthGrantManagement(ctx context.Context, id string) error {
+	return s.st.RevokeOAuthGrant(ctx, id)
+}
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")

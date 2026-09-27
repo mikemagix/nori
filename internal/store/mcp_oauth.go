@@ -80,6 +80,19 @@ type OAuthGrantApproval struct {
 	Code            OAuthRecord
 }
 
+// OAuthGrantBootstrap is the non-credential information that mcpauth can
+// prove from a live legacy authorization-code record. It deliberately omits
+// code data so the projection path cannot expose a raw OAuth payload.
+type OAuthGrantBootstrap struct {
+	ClientKey       string
+	ClientName      string
+	ClientExpiresAt time.Time
+	ApprovedAt      time.Time
+	Family          string
+	FamilyExpiresAt time.Time
+	Scopes          string
+}
+
 type oauthManagedRegistration struct {
 	ClientName string `json:"client_name"`
 	ApprovedAt int64  `json:"approved_at"`
@@ -205,6 +218,81 @@ func (s *Store) ApproveOAuthGrant(ctx context.Context, a OAuthGrantApproval) (OA
 		return OAuthGrant{}, err
 	}
 	return OAuthGrant{ManagementID: id, ClientName: a.ClientName, Scopes: a.Scopes, ApprovedAt: time.Unix(a.ApprovedAt.Unix(), 0), ExpiresAt: time.Unix(a.FamilyExpiresAt.Unix(), 0), Status: OAuthGrantActive}, nil
+}
+
+// ListOAuthRecords is restricted to the OAuth server's recovery path. The
+// Settings layer receives only the dedicated management projection methods.
+func (s *Store) ListOAuthRecords(ctx context.Context, kind string) ([]OAuthRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT key,data,expires,family,used FROM mcp_oauth WHERE kind=? AND expires>?`, kind, time.Now().Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var records []OAuthRecord
+	for rows.Next() {
+		var record OAuthRecord
+		record.Kind = kind
+		if err := rows.Scan(&record.Key, &record.Data, &record.Expires, &record.Family, &record.Used); err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	return records, rows.Err()
+}
+
+// BootstrapOAuthGrant persists a projection for a legacy family only when
+// mcpauth has already verified its immutable original approval metadata.
+func (s *Store) BootstrapOAuthGrant(ctx context.Context, a OAuthGrantBootstrap) error {
+	now := time.Now()
+	if a.ClientKey == "" || a.ClientName == "" || a.Family == "" || a.Scopes == "" || a.ApprovedAt.IsZero() || !a.ClientExpiresAt.After(now) || !a.FamilyExpiresAt.After(now) {
+		return errors.New("invalid OAuth grant bootstrap")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM mcp_oauth WHERE expires <= ?`, now.Unix()); err != nil {
+		return err
+	}
+	var liveClient int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM mcp_oauth WHERE key=? AND kind='client' AND used=0 AND expires>?`, a.ClientKey, now.Unix()).Scan(&liveClient); err != nil {
+		return err
+	}
+	if liveClient != 1 {
+		return ErrNotFound
+	}
+	var tombstoned int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM mcp_oauth WHERE kind=? AND family=?`, oauthRevokedKind, a.Family).Scan(&tombstoned); err != nil {
+		return err
+	}
+	if tombstoned != 0 {
+		return ErrNotFound
+	}
+	var existing int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM mcp_oauth WHERE kind=? AND family=?`, oauthManagedGrantKind, a.Family).Scan(&existing); err != nil {
+		return err
+	}
+	if existing != 0 {
+		return tx.Commit()
+	}
+	registrationKey := oauthManagementKey("oauth-managed-registration", a.ClientKey)
+	registration := oauthManagedRegistration{ClientName: a.ClientName, ApprovedAt: a.ApprovedAt.Unix(), ExpiresAt: a.ClientExpiresAt.Unix()}
+	if err := upsertOAuthManagedRegistrationTx(ctx, tx, registrationKey, registration); err != nil {
+		return err
+	}
+	id, err := newOAuthManagementID()
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(oauthManagedGrant{ManagementID: id, RegistrationKey: registrationKey, ClientName: a.ClientName, Scopes: a.Scopes, ApprovedAt: a.ApprovedAt.Unix(), GrantExpiresAt: a.FamilyExpiresAt.Unix()})
+	if err != nil {
+		return err
+	}
+	if err := insertOAuthTx(ctx, tx, OAuthRecord{Key: oauthManagementKey("oauth-managed-grant", id), Kind: oauthManagedGrantKind, Data: data, Family: a.Family, Expires: a.FamilyExpiresAt.Add(oauthFamilyTombstoneLifetime).Unix()}); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func upsertOAuthManagedRegistrationTx(ctx context.Context, tx *sql.Tx, key string, registration oauthManagedRegistration) error {
