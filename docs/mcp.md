@@ -48,6 +48,13 @@ on an already initialized client connection.
   prevents an exchange already in flight from inserting new usable tokens.
   Keep that marker longer than the maximum grant lifetime: currently 31 days
   versus 30 days. Never delete used refresh records early; they detect replay.
+- Settings receives a dedicated, safe projection of approved client
+  registrations and grants. It must never receive generic OAuth records: they
+  contain credential hashes and protocol-private metadata. A one-grant revoke
+  tombstones only that token family and preserves the client registration and
+  every other family. Safe grant projections are retained through the same
+  post-expiry revocation window so a recent revoked connection is not shown as
+  active after a restart.
 - Credentials are hashed before they reach storage. Do not log credentials,
   authorization query strings, deploy scripts or environment contents.
 - Disabling MCP, changing its public URL or revoking all access changes the
@@ -97,6 +104,18 @@ When verifying changes to this page:
 - After enabling and saving, verify that the connection notes show the saved
   URL plus `/mcp`, alongside the read/write access explanation. Check note padding
   and the separate revoke-access section at desktop and mobile widths.
+- The Connected OAuth clients section lists only approved connections. Its
+  rows show the original approved scopes, approval and expiry times, and
+  lifecycle status; they must not reveal codes, tokens, credential hashes,
+  client secrets, redirect URLs, or token-family identifiers. Check long,
+  untrusted client names at desktop and narrow widths.
+- Individual revocation starts with a confirmation page that names the selected
+  client and scope. A confirmed revoke must leave sibling grants usable. It
+  requires the signed administrator session, CSRF proof, a body no larger than
+  16 KiB, the saved public Host, and exactly one matching non-null Origin. The
+  server deliberately ignores forwarding headers. An instance without a saved
+  public URL may complete first-time Settings setup with the existing session
+  and CSRF protections.
 - Confirm that disabling access or revoking all access requires clients to
   authorize again, as described in the form notes.
 
@@ -173,8 +192,9 @@ client. They do not deploy containers on a live host.
   refresh exchange through two independent stores, live grants and revoked
   families across restart, and scope-escalation rejection.
 - `web/mcp_settings_test.go`: real OAuth-to-MCP HTTP flow, default write access,
-  write-only secret protection, settings/CSRF/revocation and Secure cookie upgrade
-  behind a proxy.
+  write-only secret protection, Settings CSRF/origin/body limits, global and
+  individual revocation isolation, safe rendered inventory, and Secure cookie
+  upgrade behind a proxy.
 - `web/mcp_test.go`: tool lifecycle, partial updates, scopes, self-service guards,
   and validation.
 - `docker/logs_test.go`: bounded container log decoding, oversized frames and
@@ -196,14 +216,6 @@ the launcher's special self-service workflow. Apply consistent validation,
 atomic config/environment saves and conflict handling to both interfaces.
 Acceptance: dashboard/MCP parity tests; overlapping writes cannot silently
 restore old configuration; invalid input never partially saves.
-
-### [Manage individual connected OAuth clients and grants](https://github.com/tomusdrw/nori/issues/25)
-
-Add an authenticated Settings view listing approved clients and grants with
-scope, approval/expiry times and individual revocation. Keep client registration
-separate from authorization grants so revoking one connection need not erase
-all clients. Acceptance: revoke one grant while another stays usable, preserve
-revocation across restart, and expose no tokens or client secrets in the UI.
 
 ### [Verify OAuth interoperability and browser consent before release](https://github.com/tomusdrw/nori/issues/26)
 

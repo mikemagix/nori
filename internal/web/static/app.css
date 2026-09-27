@@ -527,3 +527,50 @@ kbd { display: inline-grid; min-width: 19px; height: 19px; margin-left: 3px; pla
 .notify-matrix input[type="checkbox"] { width: 1.05em; height: 1.05em; margin: 0; accent-color: var(--primary); cursor: pointer; }
 .notify-matrix input[type="checkbox"]:disabled { cursor: not-allowed; opacity: 0.35; }
 .notify-notes { padding: 12px 14px 20px; }
+
+/* Settings: safe OAuth connection inventory */
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.oauth-grant-inventory { margin-top: 28px; }
+.oauth-grant-unavailable, .oauth-grant-empty { margin: 0; padding: 18px 20px; color: var(--text-muted); }
+.oauth-grant-unavailable { border-top: 1px solid rgba(249, 112, 102, 0.18); background: rgba(249, 112, 102, 0.035); color: #d9a09c; }
+.oauth-grant-unavailable p { margin: 5px 0 0; }
+.oauth-registration { padding: 18px 20px 0; border-top: 1px solid var(--border); }
+.oauth-registration-heading { margin-bottom: 13px; }
+.oauth-registration-heading h3 { margin: 0 0 3px; color: var(--text); font-size: 0.9rem; overflow-wrap: anywhere; }
+.oauth-registration-heading p { margin: 0; color: var(--text-muted); font-size: 0.75rem; }
+.oauth-grant-table-wrap { border: 1px solid var(--border); border-radius: 10px; margin-bottom: 18px; }
+.oauth-grant-table th, .oauth-grant-table td { white-space: normal; }
+.oauth-grant-table th { padding: 10px 14px; }
+.oauth-grant-table td { padding: 11px 14px; overflow-wrap: anywhere; }
+.oauth-grant-scopes { max-width: 30rem; font-family: var(--font-mono); font-size: 0.74rem; }
+.oauth-grant-status { text-transform: capitalize; }
+.oauth-grant-status[data-status="active"] { border-color: rgba(50, 213, 131, 0.24); background: rgba(50, 213, 131, 0.09); color: #72e5a7; }
+.oauth-grant-status[data-status="revoked"] { border-color: rgba(249, 112, 102, 0.24); background: rgba(249, 112, 102, 0.08); color: #ffaaa3; }
+.oauth-grant-status[data-status="expired"] { background: rgba(255,255,255,0.03); color: var(--text-muted); }
+.oauth-grant-action { min-width: 8.5rem; text-align: right; }
+.oauth-grant-action .button { white-space: nowrap; }
+.oauth-grant-no-action { color: var(--text-muted); font-size: 0.74rem; }
+.oauth-grant-confirmation { max-width: 760px; }
+.oauth-grant-details { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0; margin: 0; padding: 0 20px; }
+.oauth-grant-details > div { min-width: 0; padding: 15px 0; border-top: 1px solid var(--border); }
+.oauth-grant-details > div:nth-child(odd) { padding-right: 20px; }
+.oauth-grant-details dt { margin-bottom: 5px; color: var(--text-muted); font-size: 0.68rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
+.oauth-grant-details dd { margin: 0; color: var(--text-soft); overflow-wrap: anywhere; }
+.oauth-grant-confirm-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; padding: 18px 20px; border-top: 1px solid var(--border); }
+
+@media (max-width: 760px) {
+  .oauth-registration { padding-inline: 18px; }
+  .oauth-grant-table-wrap { overflow: visible; border: 0; border-radius: 0; }
+  .oauth-grant-table, .oauth-grant-table tbody, .oauth-grant-table tr, .oauth-grant-table td { display: block; width: 100%; }
+  .oauth-grant-table thead { display: none; }
+  .oauth-grant-table tr { padding: 5px 0; border-top: 1px solid var(--border); }
+  .oauth-grant-table tbody tr:first-child { border-top: 0; }
+  .oauth-grant-table td { display: grid; grid-template-columns: minmax(6rem, 36%) minmax(0, 1fr); gap: 12px; padding: 8px 0; border: 0; }
+  .oauth-grant-table td::before { content: attr(data-label); color: var(--text-muted); font-size: 0.66rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
+  .oauth-grant-action { text-align: left; }
+  .oauth-grant-action .button { width: 100%; justify-content: center; }
+  .oauth-grant-details { grid-template-columns: 1fr; padding-inline: 18px; }
+  .oauth-grant-details > div:nth-child(odd) { padding-right: 0; }
+  .oauth-grant-confirm-actions { justify-content: stretch; padding-inline: 18px; }
+  .oauth-grant-confirm-actions .button { flex: 1; }
+}

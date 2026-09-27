@@ -5,11 +5,11 @@ import (
 	"nori/internal/store"
 )
 
-templ SettingsPage(botName string, csrf string, errMsg string, saved bool, mcpConfig store.MCPConfig, channels Channels, routing notify.Routing) {
-	@Layout("Settings", csrf, settingsContent(botName, csrf, errMsg, saved, mcpConfig, channels, routing))
+templ SettingsPage(botName string, csrf string, errMsg string, saved bool, mcpConfig store.MCPConfig, mcpView mcpSettingsView, channels Channels, routing notify.Routing) {
+	@Layout("Settings", csrf, settingsContent(botName, csrf, errMsg, saved, mcpConfig, mcpView, channels, routing))
 }
 
-templ settingsContent(botName string, csrf string, errMsg string, saved bool, mcpConfig store.MCPConfig, channels Channels, routing notify.Routing) {
+templ settingsContent(botName string, csrf string, errMsg string, saved bool, mcpConfig store.MCPConfig, mcpView mcpSettingsView, channels Channels, routing notify.Routing) {
 	<section class="page-heading form-heading">
 		<div>
 			<p class="eyebrow">Instance</p>
@@ -27,6 +27,18 @@ templ settingsContent(botName string, csrf string, errMsg string, saved bool, mc
 		<div class="alert alert-success" role="status">
 			<strong>Saved</strong>
 			<span>Settings updated. Notification and MCP access changes take effect immediately.</span>
+		</div>
+	}
+	if mcpView.GrantRevoked {
+		<div class="alert alert-success" role="status" tabindex="-1">
+			<strong>Connection revoked</strong>
+			<span>The selected OAuth connection can no longer access MCP. <a href="#connected-oauth-clients">Return to connections</a>.</span>
+		</div>
+	}
+	if mcpView.GrantError != "" {
+		<div class="alert alert-error" role="alert" tabindex="-1">
+			<strong>Couldn’t revoke connection</strong>
+			<span>{ mcpView.GrantError }</span>
 		</div>
 	}
 	<form method="post" action="/settings" class="service-form">
@@ -121,6 +133,63 @@ templ settingsContent(botName string, csrf string, errMsg string, saved bool, mc
 		</div>
 	</form>
 	if mcpConfig.Enabled {
+		<section class="panel oauth-grant-inventory" aria-labelledby="connected-oauth-clients">
+			<div class="panel-heading">
+				<div>
+					<h2 id="connected-oauth-clients">Connected OAuth clients</h2>
+					<p>Review each approved client connection. Revoking one connection leaves other clients and grants in place.</p>
+				</div>
+			</div>
+			if mcpView.InventoryUnavailable {
+				<div class="oauth-grant-unavailable" role="alert">
+					<strong>Connections unavailable</strong>
+					<p>Couldn’t load OAuth connections. No connection status is shown until this can be read safely.</p>
+				</div>
+			} else if len(mcpView.Registrations) == 0 {
+				<p class="oauth-grant-empty">No approved OAuth clients are connected.</p>
+			} else {
+				for _, registration := range mcpView.Registrations {
+					<section class="oauth-registration">
+						<div class="oauth-registration-heading">
+							<div>
+								<h3>{ registration.ClientName }</h3>
+								<p>Approved { registration.ApprovedAt.Format("Jan 2, 2006 15:04 MST") }</p>
+							</div>
+						</div>
+						<div class="table-wrap oauth-grant-table-wrap">
+							<table class="oauth-grant-table" aria-label={ "OAuth grants for " + registration.ClientName }>
+								<thead>
+									<tr>
+										<th scope="col">Scopes</th>
+										<th scope="col">Approved</th>
+										<th scope="col">Expires</th>
+										<th scope="col">Status</th>
+										<th scope="col"><span class="sr-only">Connection actions</span></th>
+									</tr>
+								</thead>
+								<tbody>
+									for _, grant := range registration.Grants {
+										<tr>
+											<td data-label="Scopes" class="oauth-grant-scopes">{ grant.Scopes }</td>
+											<td data-label="Approved">{ grant.ApprovedAt.Format("Jan 2, 2006 15:04 MST") }</td>
+											<td data-label="Expires">{ grant.ExpiresAt.Format("Jan 2, 2006 15:04 MST") }</td>
+											<td data-label="Status"><span class="badge oauth-grant-status" data-status={ string(grant.Status) }>{ grant.Status }</span></td>
+											<td data-label="Action" class="oauth-grant-action">
+												if grant.Status == store.OAuthGrantActive {
+													<a class="button button-danger" href={ "/settings/mcp/grants/" + grant.ManagementID + "/revoke" } aria-label={ "Revoke " + grant.ClientName + " OAuth connection approved " + grant.ApprovedAt.Format("Jan 2, 2006 15:04 MST") }>Revoke</a>
+												} else {
+													<span class="oauth-grant-no-action">No action available</span>
+												}
+											</td>
+										</tr>
+									}
+								</tbody>
+							</table>
+						</div>
+					</section>
+				}
+			}
+		</section>
 		<section class="danger-zone">
 			<div>
 				<h2>Revoke agent access</h2>
@@ -132,6 +201,51 @@ templ settingsContent(botName string, csrf string, errMsg string, saved bool, mc
 			</form>
 		</section>
 	}
+}
+
+templ MCPGrantRevokeConfirmPage(botName string, csrf string, grant store.OAuthGrant) {
+	@Layout("Revoke OAuth connection", csrf, mcpGrantRevokeConfirmContent(botName, csrf, grant))
+}
+
+templ mcpGrantRevokeConfirmContent(botName string, csrf string, grant store.OAuthGrant) {
+	<section class="page-heading form-heading">
+		<div>
+			<p class="eyebrow">Agent access (MCP)</p>
+			<h1>Revoke connection</h1>
+			<p class="page-subtitle">Confirm that this one OAuth connection should lose access. Other clients and grants stay connected.</p>
+		</div>
+	</section>
+	<section class="panel oauth-grant-confirmation" aria-labelledby="revoke-connection-details">
+		<div class="panel-heading">
+			<div>
+				<h2 id="revoke-connection-details">Connection to revoke</h2>
+				<p>Its active access and refresh credentials will stop working immediately.</p>
+			</div>
+		</div>
+		<dl class="oauth-grant-details">
+			<div>
+				<dt>OAuth client</dt>
+				<dd>{ grant.ClientName }</dd>
+			</div>
+			<div>
+				<dt>Approved scopes</dt>
+				<dd>{ grant.Scopes }</dd>
+			</div>
+			<div>
+				<dt>Approved</dt>
+				<dd>{ grant.ApprovedAt.Format("Jan 2, 2006 15:04 MST") }</dd>
+			</div>
+			<div>
+				<dt>Expires</dt>
+				<dd>{ grant.ExpiresAt.Format("Jan 2, 2006 15:04 MST") }</dd>
+			</div>
+		</dl>
+		<form method="post" action={ "/settings/mcp/grants/" + grant.ManagementID + "/revoke" } class="oauth-grant-confirm-actions">
+			<input type="hidden" name="csrf_token" value={ csrf }/>
+			<button class="button button-ghost" type="submit" name="decision" value="cancel">Cancel</button>
+			<button class="button button-danger" type="submit" name="decision" value="revoke">Revoke connection</button>
+		</form>
+	</section>
 }
 
 templ channelStatusRow(name string, envVars string, configured bool) {

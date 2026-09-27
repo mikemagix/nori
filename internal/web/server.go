@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -39,6 +40,7 @@ type selfEnvironmentStore interface {
 
 type Server struct {
 	store           *store.Store
+	oauth           *mcpauth.Server
 	docker          docker.Client
 	executor        *executor.Executor
 	poller          *poller.Poller
@@ -68,12 +70,12 @@ func NewServer(st *store.Store, dk docker.Client, ex *executor.Executor, pl *pol
 	// Intentionally outside the auth group so proxies and uptime monitors can
 	// reach it; the response carries no information beyond liveness.
 	r.Get("/healthz", s.handleHealthz)
-	oauth := mcpauth.New(st, a)
-	r.Handle("/mcp", oauth.Protect(s.newMCPHandler()))
-	r.Handle("/oauth/*", oauth)
-	r.Handle("/.well-known/oauth-authorization-server", oauth)
-	r.Handle("/.well-known/oauth-protected-resource", oauth)
-	r.Handle("/.well-known/oauth-protected-resource/mcp", oauth)
+	s.oauth = mcpauth.New(st, a)
+	r.Handle("/mcp", s.oauth.Protect(s.newMCPHandler()))
+	r.Handle("/oauth/*", s.oauth)
+	r.Handle("/.well-known/oauth-authorization-server", s.oauth)
+	r.Handle("/.well-known/oauth-protected-resource", s.oauth)
+	r.Handle("/.well-known/oauth-protected-resource/mcp", s.oauth)
 
 	r.Group(func(r chi.Router) {
 		r.Use(s.auth.Middleware)
@@ -98,9 +100,29 @@ func NewServer(st *store.Store, dk docker.Client, ex *executor.Executor, pl *pol
 		r.Get("/services/{name}/logs/stream", s.handleLogsStream)
 		r.Get("/deployments/{id}", s.handleDeployment)
 		r.Get("/deployments/{id}/stream", s.handleDeploymentStream)
+	})
+
+	// Settings reads need a signed administrator session, but no CSRF proof.
+	// Keep them outside the mutation chain so its body and origin guarantees are
+	// easy to audit independently.
+	r.Group(func(r chi.Router) {
+		r.Use(s.auth.Middleware)
 		r.Get("/settings", s.handleSettingsGet)
+		r.Get("/settings/mcp/grants/{id}/revoke", s.handleMCPGrantRevokeConfirm)
+	})
+
+	// Every Settings endpoint that can rotate the MCP epoch or invalidate a
+	// family passes through this exact order. CSRF parses form bodies, so the
+	// cap must come first; the configured origin is intentionally read from
+	// persistent Settings rather than any forwarding header.
+	r.Group(func(r chi.Router) {
+		r.Use(s.auth.Middleware)
+		r.Use(s.mcpSettingsBodyLimit)
+		r.Use(s.mcpSettingsOrigin)
+		r.Use(s.auth.CSRFMiddleware)
 		r.Post("/settings", s.handleSettingsPost)
 		r.Post("/settings/mcp/revoke", s.handleMCPRevoke)
+		r.Post("/settings/mcp/grants/{id}/revoke", s.handleMCPGrantRevoke)
 	})
 
 	sub, _ := fs.Sub(staticFS, "static")
@@ -143,6 +165,73 @@ func (s *Server) mcpSecureCookies(next http.Handler) http.Handler {
 	})
 }
 
+const mcpSettingsBodyLimit int64 = 16 << 10
+
+// mcpSettingsBodyLimit runs before CSRF because auth.CSRFMiddleware obtains
+// its form token through FormValue. Content-Length lets us reject a known
+// oversized request before any parser work; MaxBytesReader covers streamed
+// requests as they are consumed by the next middleware.
+func (s *Server) mcpSettingsBodyLimit(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ContentLength > mcpSettingsBodyLimit {
+			http.Error(w, "settings request is too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, mcpSettingsBodyLimit)
+		next.ServeHTTP(w, r)
+	})
+}
+
+// mcpSettingsOrigin authorizes a destructive Settings request against the
+// instance's already-saved public origin. It deliberately ignores Forwarded
+// and X-Forwarded-* headers: proxy claims are not browser-origin proof. A new
+// installation has no persisted public origin, so it can complete first-time
+// setup with the existing session + CSRF protections.
+func (s *Server) mcpSettingsOrigin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cfg, err := s.store.GetMCPConfig(r.Context())
+		if err != nil {
+			http.Error(w, "could not verify MCP settings origin", http.StatusInternalServerError)
+			return
+		}
+		if cfg.PublicURL == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		configured, err := url.Parse(cfg.PublicURL)
+		if err != nil || configured.Scheme == "" || configured.Host == "" || r.Host != configured.Host {
+			http.Error(w, "invalid settings origin", http.StatusForbidden)
+			return
+		}
+		origins := r.Header.Values("Origin")
+		if len(origins) != 1 || origins[0] == "null" {
+			http.Error(w, "invalid settings origin", http.StatusForbidden)
+			return
+		}
+		origin, err := url.Parse(origins[0])
+		if err != nil || origin.Scheme != configured.Scheme || origin.Host != configured.Host || origin.User != nil || origin.Path != "" || origin.RawPath != "" || origin.RawQuery != "" || origin.Fragment != "" {
+			http.Error(w, "invalid settings origin", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+type mcpSettingsView struct {
+	Registrations        []store.OAuthRegistration
+	InventoryUnavailable bool
+	GrantRevoked         bool
+	GrantError           string
+}
+
+func (s *Server) mcpSettingsView(ctx context.Context) mcpSettingsView {
+	registrations, err := s.oauth.ListOAuthGrantManagement(ctx)
+	if err != nil {
+		return mcpSettingsView{InventoryUnavailable: true}
+	}
+	return mcpSettingsView{Registrations: registrations}
+}
+
 func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
 	routing := notify.EffectiveRouting(s.store.NotifyRoutingRaw(r.Context()), s.store.NotifyMode(r.Context()))
 	cfg, err := s.store.GetMCPConfig(r.Context())
@@ -150,11 +239,12 @@ func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not load MCP settings", http.StatusInternalServerError)
 		return
 	}
-	_ = SettingsPage(BotName(r.Context()), s.csrf(r), "", r.URL.Query().Get("saved") == "1", cfg, s.channels, routing).Render(r.Context(), w)
+	view := s.mcpSettingsView(r.Context())
+	view.GrantRevoked = r.URL.Query().Get("mcp_grant_revoked") == "1"
+	_ = SettingsPage(BotName(r.Context()), s.csrf(r), "", r.URL.Query().Get("saved") == "1", cfg, view, s.channels, routing).Render(r.Context(), w)
 }
 
 func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -205,7 +295,7 @@ func (s *Server) renderSettingsError(w http.ResponseWriter, r *http.Request, bot
 	// Preserve whatever the user typed (not the normalized value) so they can
 	// see and fix their input on re-render.
 	cfg := store.MCPConfig{Enabled: r.FormValue("mcp_enabled") == "1", PublicURL: r.FormValue("mcp_public_url")}
-	_ = SettingsPage(botName, s.csrf(r), errMsg, false, cfg, s.channels, routing).Render(r.Context(), w)
+	_ = SettingsPage(botName, s.csrf(r), errMsg, false, cfg, s.mcpSettingsView(r.Context()), s.channels, routing).Render(r.Context(), w)
 }
 
 func (s *Server) handleMCPRevoke(w http.ResponseWriter, r *http.Request) {
@@ -219,6 +309,60 @@ func (s *Server) handleMCPRevoke(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Print("mcp: administrator revoked all agent access")
 	http.Redirect(w, r, "/settings?saved=1", http.StatusSeeOther)
+}
+
+func (s *Server) handleMCPGrantRevokeConfirm(w http.ResponseWriter, r *http.Request) {
+	grant, err := s.oauth.GetOAuthGrantManagement(r.Context(), chi.URLParam(r, "id"))
+	if errors.Is(err, store.ErrNotFound) {
+		http.Error(w, "that OAuth connection is no longer active", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, "could not load the OAuth connection", http.StatusInternalServerError)
+		return
+	}
+	_ = MCPGrantRevokeConfirmPage(BotName(r.Context()), s.csrf(r), grant).Render(r.Context(), w)
+}
+
+func (s *Server) handleMCPGrantRevoke(w http.ResponseWriter, r *http.Request) {
+	decisions := r.Form["decision"]
+	if len(decisions) != 1 {
+		http.Error(w, "choose whether to revoke this OAuth connection", http.StatusBadRequest)
+		return
+	}
+	switch decisions[0] {
+	case "cancel":
+		http.Redirect(w, r, "/settings", http.StatusSeeOther)
+		return
+	case "revoke":
+		// Continue below. The Store reloads and claims this single opaque ID in
+		// its revocation transaction rather than trusting confirmation state.
+	default:
+		http.Error(w, "choose whether to revoke this OAuth connection", http.StatusBadRequest)
+		return
+	}
+	if err := s.oauth.RevokeOAuthGrantManagement(r.Context(), chi.URLParam(r, "id")); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			http.Error(w, "that OAuth connection is no longer active", http.StatusConflict)
+			return
+		}
+		// Do not redirect to the normal success view: a storage error does not
+		// prove whether a rollback or commit won, so the connection may remain
+		// active and the administrator needs an explicit uncertainty warning.
+		routing := notify.EffectiveRouting(s.store.NotifyRoutingRaw(r.Context()), s.store.NotifyMode(r.Context()))
+		cfg, cfgErr := s.store.GetMCPConfig(r.Context())
+		if cfgErr != nil {
+			http.Error(w, "could not revoke the OAuth connection; it may still be active", http.StatusInternalServerError)
+			return
+		}
+		view := s.mcpSettingsView(r.Context())
+		view.GrantError = "Could not confirm that the connection was revoked. It may still be active."
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = SettingsPage(BotName(r.Context()), s.csrf(r), "", false, cfg, view, s.channels, routing).Render(r.Context(), w)
+		return
+	}
+	log.Print("mcp: administrator revoked one OAuth connection")
+	http.Redirect(w, r, "/settings?mcp_grant_revoked=1", http.StatusSeeOther)
 }
 
 func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {

@@ -375,10 +375,10 @@ func (s *Store) ListOAuthGrantManagement(ctx context.Context) ([]OAuthRegistrati
 	for i := range registrations {
 		sort.Slice(registrations[i].Grants, func(a, b int) bool {
 			left, right := registrations[i].Grants[a], registrations[i].Grants[b]
-		if left.ApprovedAt.Equal(right.ApprovedAt) {
-			return left.ManagementID < right.ManagementID
-		}
-		return left.ApprovedAt.After(right.ApprovedAt)
+			if left.ApprovedAt.Equal(right.ApprovedAt) {
+				return left.ManagementID < right.ManagementID
+			}
+			return left.ApprovedAt.After(right.ApprovedAt)
 		})
 	}
 	return registrations, nil
