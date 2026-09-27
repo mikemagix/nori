@@ -147,6 +147,10 @@ func (s *Server) newMCPHandler() http.Handler {
 		}
 		svc := &store.Service{Name: in.Name, WatchedImage: in.WatchedImage, DeployScript: in.DeployScript, Policy: store.Policy(in.Policy), CronExpr: in.CronExpr, HealthURL: in.HealthURL}
 		if _, err := s.saveOrdinaryService(ctx, ordinaryWrite{Service: svc, Environment: in.EnvFile, EnvironmentMode: templateEnvironment}); err != nil {
+			var validationErr *ordinaryValidationError
+			if errors.As(err, &validationErr) {
+				return nil, errors.New("invalid service configuration; check the name, image, policy, schedule, script, health URL, and environment format")
+			}
 			return nil, errors.New("could not create service; check that its name is unique")
 		}
 		return svc, nil
@@ -178,6 +182,10 @@ func (s *Server) newMCPHandler() http.Handler {
 		if _, err := s.saveOrdinaryService(ctx, ordinaryWrite{Service: svc, Previous: expected, Environment: in.EnvFile, EnvironmentMode: templateEnvironment}); err != nil {
 			if errors.Is(err, store.ErrServiceConflict) {
 				return nil, errors.New("configuration changed; read it again and retry")
+			}
+			var validationErr *ordinaryValidationError
+			if errors.As(err, &validationErr) {
+				return nil, errors.New("invalid service configuration; check the image, policy, schedule, script, health URL, and environment format")
 			}
 			return nil, errors.New("could not update service")
 		}
@@ -471,11 +479,11 @@ func (s *Server) mcpService(ctx context.Context, id int64, mutation bool) (*stor
 var mcpServiceName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$`)
 
 func validateMCPService(ctx context.Context, svc *store.Service, env *string) error {
-	return validateOrdinaryService(ctx, svc, env, true)
+	return validateOrdinaryService(ctx, svc, env, true, true)
 }
 
-func validateOrdinaryService(ctx context.Context, svc *store.Service, env *string, template bool) error {
-	if !mcpServiceName.MatchString(svc.Name) || svc.Name == store.SelfServiceName {
+func validateOrdinaryService(ctx context.Context, svc *store.Service, env *string, template, validateName bool) error {
+	if validateName && (!mcpServiceName.MatchString(svc.Name) || svc.Name == store.SelfServiceName) {
 		return errors.New("invalid or reserved service name")
 	}
 	if strings.TrimSpace(svc.WatchedImage) == "" || len(svc.WatchedImage) > 512 {

@@ -79,6 +79,11 @@ func TestMCPServiceLifecycleAndScopes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	invalid := call("update_service", map[string]any{"service_id": svc.ID, "health_url": "ftp://bad"}, true)
+	invalidData, _ := json.Marshal(invalid)
+	if !bytes.Contains(invalidData, []byte("invalid service configuration")) || bytes.Contains(invalidData, []byte("could not update service")) {
+		t.Fatalf("invalid update error = %s", invalidData)
+	}
 	args := map[string]any{"service_id": svc.ID}
 	staleVersion := svc.ConfigVersion
 	call("set_service_secret", map[string]any{"service_id": svc.ID, "expected_config_version": staleVersion, "key": "SECRET", "value": "unlisted"}, false)

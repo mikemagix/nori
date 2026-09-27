@@ -515,6 +515,11 @@ func (s *Server) handleServiceUpdate(w http.ResponseWriter, r *http.Request) {
 			current, currentErr := s.store.GetService(r.Context(), svc.ID)
 			if currentErr == nil {
 				conflictForm := serviceForm(current)
+				conflictForm.EnvFile, currentErr = s.store.GetEnvFile(r.Context(), current.ID)
+				if currentErr != nil {
+					http.Error(w, "could not reload service configuration", http.StatusInternalServerError)
+					return
+				}
 				conflictForm.ReloadURL = "/services/" + current.Name + "/edit"
 				w.WriteHeader(http.StatusConflict)
 				_ = ServiceFormPage(conflictForm, s.csrf(r), true, "/services/"+current.Name, "The configuration changed. Reload it before trying again.").Render(r.Context(), w)
@@ -528,6 +533,11 @@ func (s *Server) handleServiceUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		if !svc.IsSelf {
 			retryForm := serviceForm(svc)
+			retryForm.EnvFile, err = s.store.GetEnvFile(r.Context(), svc.ID)
+			if err != nil {
+				http.Error(w, "could not reload service configuration", http.StatusInternalServerError)
+				return
+			}
 			_ = ServiceFormPage(retryForm, s.csrf(r), true, "/services/"+svc.Name, "No changes were saved. Try again.").Render(r.Context(), w)
 			return
 		}

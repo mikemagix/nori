@@ -77,8 +77,36 @@ func TestServiceUpdateRejectsStaleGenerationWithoutRenderingSubmittedEnvironment
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusConflict, rr.Body.String())
 	}
-	if body := rr.Body.String(); !strings.Contains(body, "Reload configuration") || strings.Contains(body, "TOKEN=stale") {
-		t.Fatalf("conflict response must offer reload without submitted environment: %s", body)
+	if body := rr.Body.String(); !strings.Contains(body, "Reload configuration") || !strings.Contains(body, "TOKEN=current") || strings.Contains(body, "TOKEN=stale") {
+		t.Fatalf("conflict response must preserve persisted environment without submitted environment: %s", body)
+	}
+}
+
+func TestLegacyServiceNameCanBeUpdated(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "nori.db"), make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	legacy := &store.Service{Name: "Legacy Service", WatchedImage: "nginx:latest", Policy: store.PolicyManual, DeployScript: "true"}
+	if err := st.CreateService(ctx, legacy); err != nil {
+		t.Fatal(err)
+	}
+	candidate := *legacy
+	candidate.DeployScript = "echo updated"
+	previous := *legacy
+	if _, err := (&Server{store: st}).saveOrdinaryService(ctx, ordinaryWrite{
+		Service: &candidate, Previous: &previous, EnvironmentMode: dashboardEnvironment,
+	}); err != nil {
+		t.Fatalf("legacy service update failed: %v", err)
+	}
+	updated, err := st.GetService(ctx, legacy.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.DeployScript != "echo updated" {
+		t.Fatalf("deploy script = %q, want updated script", updated.DeployScript)
 	}
 }
 

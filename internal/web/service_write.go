@@ -36,7 +36,7 @@ func (s *Server) saveOrdinaryService(ctx context.Context, write ordinaryWrite) (
 	if write.Service.IsSelf {
 		return nil, errors.New("managed self-service must use its launcher workflow")
 	}
-	if err := validateOrdinaryService(ctx, write.Service, write.Environment, write.EnvironmentMode == templateEnvironment); err != nil {
+	if err := validateOrdinaryService(ctx, write.Service, write.Environment, write.EnvironmentMode == templateEnvironment, write.Previous == nil); err != nil {
 		return nil, &ordinaryValidationError{err: err}
 	}
 	var err error
