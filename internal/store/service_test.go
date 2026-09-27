@@ -49,6 +49,53 @@ func TestServiceCRUD(t *testing.T) {
 	}
 }
 
+func TestCreateServicePersistsDeploymentConfig(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+	wantConfig := `{"version":1,"port":8080}`
+	svc := &Service{
+		Name:           "managed-blog",
+		WatchedImage:   "ghcr.io/me/blog:latest",
+		Policy:         PolicyManual,
+		DeploymentMode: DeploymentModeSingleContainer,
+		TemplateConfig: wantConfig,
+	}
+	if err := st.CreateService(ctx, svc); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := st.GetService(ctx, svc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DeploymentMode != DeploymentModeSingleContainer || got.TemplateConfig != wantConfig {
+		t.Fatalf("deployment config = (%q, %q), want (%q, %q)", got.DeploymentMode, got.TemplateConfig, DeploymentModeSingleContainer, wantConfig)
+	}
+}
+
+func TestUpdateServicePersistsDeploymentConfig(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+	svc := &Service{Name: "managed-update", WatchedImage: "ghcr.io/me/blog:latest", Policy: PolicyManual}
+	if err := st.CreateService(ctx, svc); err != nil {
+		t.Fatal(err)
+	}
+
+	wantConfig := `{"version":1,"database":"blog"}`
+	svc.DeploymentMode = DeploymentModePostgres
+	svc.TemplateConfig = wantConfig
+	if err := st.UpdateService(ctx, svc); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.GetService(ctx, svc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DeploymentMode != DeploymentModePostgres || got.TemplateConfig != wantConfig {
+		t.Fatalf("deployment config = (%q, %q), want (%q, %q)", got.DeploymentMode, got.TemplateConfig, DeploymentModePostgres, wantConfig)
+	}
+}
+
 func TestGetService_NotFound(t *testing.T) {
 	st := testStore(t)
 	if _, err := st.GetService(context.Background(), 999); err != ErrNotFound {
@@ -136,5 +183,43 @@ func TestOpenMigratesExistingServiceTable(t *testing.T) {
 	defer st.Close()
 	if _, err := st.EnsureSelfService(context.Background(), "image"); err != nil {
 		t.Fatalf("migration did not add is_self: %v", err)
+	}
+}
+
+func TestOpenMigratesLegacyServiceToCustomDeployment(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-template.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE service (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, watched_image TEXT NOT NULL,
+		policy TEXT NOT NULL, cron_expr TEXT NOT NULL DEFAULT '', deploy_script TEXT NOT NULL DEFAULT '',
+		health_url TEXT NOT NULL DEFAULT '', is_self INTEGER NOT NULL DEFAULT 0,
+		created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+	);
+	INSERT INTO service (name,watched_image,policy,created_at,updated_at)
+	VALUES ('legacy','image','manual',1,1)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := Open(path, make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	got, err := st.GetServiceByName(context.Background(), "legacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DeploymentMode != DeploymentModeCustom {
+		t.Fatalf("deployment mode = %q, want %q", got.DeploymentMode, DeploymentModeCustom)
+	}
+	if got.TemplateConfig != "{}" {
+		t.Fatalf("template config = %q, want {}", got.TemplateConfig)
 	}
 }

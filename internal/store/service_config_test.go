@@ -71,6 +71,60 @@ func TestSaveServiceConfigCreateRollback(t *testing.T) {
 	}
 }
 
+func TestSaveServiceConfigCreatesDeploymentConfig(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+	wantConfig := `{"version":1,"port":8080}`
+	svc := &Service{
+		Name:           "managed-save",
+		WatchedImage:   "nginx:latest",
+		Policy:         PolicyManual,
+		DeploymentMode: DeploymentModeSingleContainer,
+		TemplateConfig: wantConfig,
+	}
+	if err := st.SaveServiceConfig(ctx, svc, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := st.GetService(ctx, svc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DeploymentMode != DeploymentModeSingleContainer || got.TemplateConfig != wantConfig {
+		t.Fatalf("deployment config = (%q, %q), want (%q, %q)", got.DeploymentMode, got.TemplateConfig, DeploymentModeSingleContainer, wantConfig)
+	}
+}
+
+func TestSaveServiceConfigRejectsStaleDeploymentConfig(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+	svc := &Service{Name: "managed-stale", WatchedImage: "nginx:latest", Policy: PolicyManual}
+	if err := st.SaveServiceConfig(ctx, svc, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	before := *svc
+
+	first := before
+	first.DeploymentMode = DeploymentModeSingleContainer
+	first.TemplateConfig = `{"version":1,"port":8080}`
+	if err := st.SaveServiceConfig(ctx, &first, nil, &before); err != nil {
+		t.Fatal(err)
+	}
+
+	second := before
+	second.WatchedImage = "nginx:alpine"
+	if err := st.SaveServiceConfig(ctx, &second, nil, &before); !errors.Is(err, ErrServiceConflict) {
+		t.Fatalf("stale template update: %v", err)
+	}
+	got, err := st.GetService(ctx, svc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DeploymentMode != first.DeploymentMode || got.TemplateConfig != first.TemplateConfig || got.WatchedImage != before.WatchedImage {
+		t.Fatalf("stale write changed service: %+v", got)
+	}
+}
+
 func TestSaveServiceConfigRejectsStaleUpdate(t *testing.T) {
 	st := testStore(t)
 	ctx := context.Background()

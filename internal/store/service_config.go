@@ -24,6 +24,7 @@ func (s *Store) SaveServiceConfigTemplate(ctx context.Context, svc *Service, env
 }
 
 func (s *Store) saveServiceConfig(ctx context.Context, svc *Service, env *string, previous *Service, template bool) error {
+	normalizeDeploymentConfig(svc)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -47,7 +48,7 @@ func (s *Store) saveServiceConfig(ctx context.Context, svc *Service, env *string
 	now := time.Now().UTC()
 	id := svc.ID
 	if id == 0 {
-		res, err := tx.ExecContext(ctx, `INSERT INTO service (name,watched_image,policy,cron_expr,deploy_script,health_url,is_self,created_at,updated_at) VALUES (?,?,?,?,?,?,0,?,?)`, svc.Name, svc.WatchedImage, svc.Policy, svc.CronExpr, svc.DeployScript, svc.HealthURL, now.Unix(), now.Unix())
+		res, err := tx.ExecContext(ctx, `INSERT INTO service (name,watched_image,policy,cron_expr,deploy_script,health_url,is_self,deployment_mode,template_config,created_at,updated_at) VALUES (?,?,?,?,?,?,0,?,?,?,?)`, svc.Name, svc.WatchedImage, svc.Policy, svc.CronExpr, svc.DeployScript, svc.HealthURL, svc.DeploymentMode, svc.TemplateConfig, now.Unix(), now.Unix())
 		if err != nil {
 			return err
 		}
@@ -59,7 +60,9 @@ func (s *Store) saveServiceConfig(ctx context.Context, svc *Service, env *string
 		if previous == nil {
 			return errors.New("previous service configuration is required for updates")
 		}
-		res, err := tx.ExecContext(ctx, `UPDATE service SET watched_image=?,policy=?,cron_expr=?,deploy_script=?,health_url=?,updated_at=? WHERE id=? AND name=? AND is_self=0 AND watched_image=? AND policy=? AND cron_expr=? AND deploy_script=? AND health_url=?`, svc.WatchedImage, svc.Policy, svc.CronExpr, svc.DeployScript, svc.HealthURL, now.Unix(), id, svc.Name, previous.WatchedImage, previous.Policy, previous.CronExpr, previous.DeployScript, previous.HealthURL)
+		expected := *previous
+		normalizeDeploymentConfig(&expected)
+		res, err := tx.ExecContext(ctx, `UPDATE service SET watched_image=?,policy=?,cron_expr=?,deploy_script=?,health_url=?,deployment_mode=?,template_config=?,updated_at=? WHERE id=? AND name=? AND is_self=0 AND watched_image=? AND policy=? AND cron_expr=? AND deploy_script=? AND health_url=? AND deployment_mode=? AND template_config=?`, svc.WatchedImage, svc.Policy, svc.CronExpr, svc.DeployScript, svc.HealthURL, svc.DeploymentMode, svc.TemplateConfig, now.Unix(), id, svc.Name, expected.WatchedImage, expected.Policy, expected.CronExpr, expected.DeployScript, expected.HealthURL, expected.DeploymentMode, expected.TemplateConfig)
 		if err != nil {
 			return err
 		}
