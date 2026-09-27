@@ -10,6 +10,12 @@ type Fake struct {
 	Containers map[string][]Container
 	Err        error
 	LogData    map[string]string
+
+	ManagedContainers map[string]ManagedContainer
+	Networks          map[string]ManagedResource
+	Volumes           map[string]ManagedResource
+	Operations        []string
+	ManagedErr        error
 }
 
 func (f *Fake) ListByService(ctx context.Context, service string) ([]Container, error) {

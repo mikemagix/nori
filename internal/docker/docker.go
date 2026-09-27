@@ -63,6 +63,7 @@ type Client interface {
 	Logs(ctx context.Context, containerID string, tail int) (io.ReadCloser, error)
 	StartByService(ctx context.Context, service string) error
 	StopByService(ctx context.Context, service string) error
+	ManagedClient
 }
 
 type realClient struct{ cli *client.Client }
