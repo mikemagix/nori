@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -103,6 +104,54 @@ func TestServiceUpdateRejectsStaleGenerationWithoutRenderingSubmittedEnvironment
 	}
 	if body := rr.Body.String(); !strings.Contains(body, "Reload configuration") || !strings.Contains(body, "TOKEN=current") || strings.Contains(body, "TOKEN=stale") {
 		t.Fatalf("conflict response must preserve persisted environment without submitted environment: %s", body)
+	}
+}
+
+func TestServiceUpdateRetryPreservesSubmittedGenerationAfterStoreFailure(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "nori.db")
+	st, err := store.Open(dbPath, make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	svc := &store.Service{Name: "app", WatchedImage: "nginx:latest", Policy: store.PolicyManual, DeployScript: "true"}
+	env := "TOKEN=current\n"
+	if err := st.SaveServiceConfig(ctx, svc, &env, nil); err != nil {
+		t.Fatal(err)
+	}
+	staleVersion := svc.ConfigVersion
+	current := *svc
+	current.DeployScript = "echo current"
+	if err := st.SaveServiceConfig(ctx, &current, nil, svc); err != nil {
+		t.Fatal(err)
+	}
+	lockedDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockedDB.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = lockedDB.Close() })
+	if _, err := lockedDB.Exec("BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = lockedDB.Exec("ROLLBACK") })
+
+	body := "name=app&watched_image=nginx%3Alatest&policy=manual&deploy_script=echo+stale&env_file=TOKEN%3Dstale&expected_config_version=" + strconv.FormatInt(staleVersion, 10)
+	req := httptest.NewRequest(http.MethodPost, "/services/app", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("name", "app")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rr := httptest.NewRecorder()
+
+	(&Server{store: st}).handleServiceUpdate(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if body := rr.Body.String(); !strings.Contains(body, `name="expected_config_version" value="1"`) || !strings.Contains(body, "TOKEN=current") || strings.Contains(body, "TOKEN=stale") {
+		t.Fatalf("retry response must preserve submitted generation and persisted environment: %s", body)
 	}
 }
 

@@ -536,6 +536,9 @@ func (s *Server) handleServiceUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		if !svc.IsSelf {
 			retryForm := serviceForm(svc)
+			// Preserve the precondition the client actually submitted; upgrading it
+			// to the freshly read version could let a retry commit stale fields.
+			retryForm.ConfigVersion = form.ConfigVersion
 			retryForm.EnvFile, err = s.store.GetEnvFile(r.Context(), svc.ID)
 			if err != nil {
 				http.Error(w, "could not reload service configuration", http.StatusInternalServerError)
