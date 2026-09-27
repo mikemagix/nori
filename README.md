@@ -479,6 +479,14 @@ Access tokens expire after at most ten minutes, or when the grant expires if
 that is sooner. Refresh tokens rotate on every use,
 expire with their grant after 30 days, and reuse revokes the entire token family.
 Credentials are stored as hashes. OAuth grants survive normal restarts.
+The **Connected OAuth clients** section in Settings lists approved connections
+by client name, scopes, approval and expiry times, and status; it never displays
+credentials, client secrets, codes, or redirect URLs. To disconnect one
+connection, select **Revoke**, review the confirmation page, and confirm. That
+revokes only the selected grant's credential family: other client connections
+remain usable, the registered client remains available, and a disconnected
+client can authorize again to create a new connection.
+
 **Revoke all agent access**, disabling MCP, or changing its public URL
 invalidates every grant and registration; reconnect/re-register clients and
 authorize again afterward. Clients can also revoke their token family through
