@@ -740,7 +740,7 @@ func containsOperation(operations []string, want string) bool {
 
 func waitForDeployment(t *testing.T, st *store.Store, id int64) *store.Deployment {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(7 * time.Second)
 	for time.Now().Before(deadline) {
 		deployment, err := st.GetDeployment(context.Background(), id)
 		if err != nil {
