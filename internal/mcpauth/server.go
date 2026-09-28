@@ -2,9 +2,13 @@
 package mcpauth
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -67,6 +71,143 @@ func (s *Server) allow(w http.ResponseWriter, key string, limit int) bool {
 }
 
 func New(st *store.Store, a *auth.Auth) *Server { return &Server{st: st, auth: a} }
+
+// ListOAuthGrantManagement exposes only Store's browser-safe management
+// projection to Settings. It deliberately does not expose generic OAuth rows,
+// whose serialized payloads include credentials and protocol-private context.
+// Legacy families are reconstructed from live code or refresh records. A
+// refresh family may contain narrowed scopes, so all of its live refresh
+// records must be considered before rebuilding the management projection.
+func (s *Server) ListOAuthGrantManagement(ctx context.Context) ([]store.OAuthRegistration, error) {
+	if err := s.bootstrapOAuthGrantManagement(ctx); err != nil {
+		return nil, err
+	}
+	return s.st.ListOAuthGrantManagement(ctx)
+}
+
+func (s *Server) bootstrapOAuthGrantManagement(ctx context.Context) error {
+	config, err := s.st.GetMCPConfig(ctx)
+	if err != nil {
+		return err
+	}
+	if !config.Enabled || config.Epoch == "" || config.PublicURL == "" {
+		return nil
+	}
+	projectedFamilies, err := s.st.ListOAuthManagedGrantFamilies(ctx)
+	if err != nil {
+		return err
+	}
+	codes, err := s.st.ListOAuthRecords(ctx, "code")
+	if err != nil {
+		return err
+	}
+	handled := make(map[string]struct{})
+	bootstrap := func(g grant, approvedAt time.Time, scopes string) error {
+		if _, ok := projectedFamilies[g.Family]; ok {
+			return nil
+		}
+		if _, ok := handled[g.Family]; ok {
+			return nil
+		}
+		handled[g.Family] = struct{}{}
+		clientRecord, err := s.st.GetOAuth(ctx, digest(g.ClientID), "client")
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil
+			}
+			return err
+		}
+		var client storedClient
+		if json.Unmarshal(clientRecord.Data, &client) != nil || client.Epoch != config.Epoch || clientRecord.Used {
+			return nil
+		}
+		err = s.st.BootstrapOAuthGrant(ctx, store.OAuthGrantBootstrap{
+			ClientKey:       digest(g.ClientID),
+			ClientName:      oauthClientDisplayName(client.Client.Name),
+			ClientExpiresAt: time.Unix(clientRecord.Expires, 0),
+			ApprovedAt:      approvedAt,
+			Family:          g.Family,
+			FamilyExpiresAt: time.Unix(g.FamilyExpires, 0),
+			Scopes:          scopes,
+		})
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		if err == nil {
+			projectedFamilies[g.Family] = struct{}{}
+		}
+		return nil
+	}
+	now := time.Now().Unix()
+	for _, code := range codes {
+		var g grant
+		if json.Unmarshal(code.Data, &g) != nil || g.ClientID == "" || g.Scope == "" || g.Family == "" || g.Family != code.Family || g.Epoch != config.Epoch || g.Resource != config.PublicURL+"/mcp" || g.FamilyExpires <= now {
+			continue
+		}
+		if err := bootstrap(g, time.Unix(code.Expires, 0).Add(-authorizationCodeLifetime), g.Scope); err != nil {
+			return err
+		}
+	}
+	refreshes, err := s.st.ListOAuthRecordsExceptFamilies(ctx, "refresh", projectedFamilies)
+	if err != nil {
+		return err
+	}
+	type refreshFamily struct {
+		grant  grant
+		scopes map[string]struct{}
+	}
+	families := make(map[string]refreshFamily)
+	for _, refresh := range refreshes {
+		if _, ok := projectedFamilies[refresh.Family]; ok {
+			continue
+		}
+		if _, ok := handled[refresh.Family]; ok {
+			continue
+		}
+		var g grant
+		if json.Unmarshal(refresh.Data, &g) != nil || g.ClientID == "" || g.Scope == "" || g.Family == "" || g.Family != refresh.Family || g.Epoch != config.Epoch || g.Resource != config.PublicURL+"/mcp" || g.FamilyExpires <= now {
+			continue
+		}
+		family := families[g.Family]
+		if family.grant.Family == "" {
+			family.grant = g
+			family.scopes = make(map[string]struct{})
+		}
+		for _, scope := range strings.Fields(g.Scope) {
+			family.scopes[scope] = struct{}{}
+		}
+		families[g.Family] = family
+	}
+	familyNames := make([]string, 0, len(families))
+	for family := range families {
+		familyNames = append(familyNames, family)
+	}
+	sort.Strings(familyNames)
+	for _, familyName := range familyNames {
+		family := families[familyName]
+		scopes := make([]string, 0, len(family.scopes))
+		for scope := range family.scopes {
+			scopes = append(scopes, scope)
+		}
+		sort.Strings(scopes)
+		if err := bootstrap(family.grant, time.Unix(family.grant.FamilyExpires, 0).Add(-grantLifetime), strings.Join(scopes, " ")); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// GetOAuthGrantManagement resolves one opaque management ID to the safe data
+// needed for a Settings confirmation page.
+func (s *Server) GetOAuthGrantManagement(ctx context.Context, id string) (store.OAuthGrant, error) {
+	return s.st.GetOAuthGrantManagement(ctx, id)
+}
+
+// RevokeOAuthGrantManagement revokes exactly one active family selected by an
+// opaque management ID. The Store owns the transaction and family tombstone.
+func (s *Server) RevokeOAuthGrantManagement(ctx context.Context, id string) error {
+	return s.st.RevokeOAuthGrant(ctx, id)
+}
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")

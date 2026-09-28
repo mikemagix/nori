@@ -28,10 +28,16 @@ templ serviceFormContent(form ServiceFormData, csrf string, isEdit bool, action 
 		<div class="alert alert-error" role="alert">
 			<strong>Couldn’t save the service</strong>
 			<span>{ errMsg }</span>
+			if form.ReloadURL != "" {
+				<a class="button button-secondary button-small" href={ templ.SafeURL(form.ReloadURL) }>Reload configuration</a>
+			}
 		</div>
 	}
 	<form id="service-form" method="post" action={ templ.SafeURL(action) } class="service-form" data-deployment-form>
 		<input type="hidden" name="csrf_token" value={ csrf }/>
+		if isEdit && !form.IsSelf {
+			<input type="hidden" name="expected_config_version" value={ strconvItoa(int(form.ConfigVersion)) }/>
+		}
 		<section class="panel form-panel">
 			<div class="panel-heading">
 				<div>

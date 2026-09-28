@@ -34,6 +34,7 @@ func (s *Store) CreateService(ctx context.Context, svc *Service) error {
 		return err
 	}
 	svc.ID, err = res.LastInsertId()
+	svc.ConfigVersion = 1
 	return err
 }
 

@@ -24,6 +24,13 @@ type storedClient struct {
 	SecretHash, Epoch string
 }
 
+func oauthClientDisplayName(name string) string {
+	if name == "" {
+		return "Unnamed client"
+	}
+	return name
+}
+
 func validRedirect(raw string) bool {
 	u, err := url.Parse(raw)
 	if err != nil || len(raw) > 2048 || u.Host == "" || u.User != nil || u.Fragment != "" || u.RawFragment != "" {

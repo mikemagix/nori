@@ -20,7 +20,7 @@ func dsn(path string) string {
 	u := url.URL{
 		Scheme:   "file",
 		Opaque:   (&url.URL{Path: path}).EscapedPath(),
-		RawQuery: url.Values{"_pragma": {"busy_timeout(5000)", "foreign_keys(1)"}}.Encode(),
+		RawQuery: url.Values{"_pragma": {"busy_timeout(5000)", "foreign_keys(1)"}, "_txlock": {"immediate"}}.Encode(),
 	}
 	return u.String()
 }

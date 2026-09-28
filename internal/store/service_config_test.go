@@ -152,3 +152,38 @@ func TestSaveServiceConfigRejectsStaleUpdate(t *testing.T) {
 		t.Fatal("conflicting update saved environment")
 	}
 }
+
+func TestSaveServiceConfigAdvancesVersionAndRejectsStaleEnvironment(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+	svc := &Service{Name: "app", WatchedImage: "nginx:latest", Policy: PolicyManual, DeployScript: "true"}
+	initialEnv := "TOKEN=first\n"
+	if err := st.SaveServiceConfig(ctx, svc, &initialEnv, nil); err != nil {
+		t.Fatal(err)
+	}
+	if svc.ConfigVersion != 1 {
+		t.Fatalf("created config version = %d, want 1", svc.ConfigVersion)
+	}
+
+	stale := *svc
+	current := *svc
+	current.DeployScript = "echo current"
+	if err := st.SaveServiceConfig(ctx, &current, nil, &stale); err != nil {
+		t.Fatal(err)
+	}
+	if current.ConfigVersion != 2 {
+		t.Fatalf("updated config version = %d, want 2", current.ConfigVersion)
+	}
+
+	staleEnv := "TOKEN=stale\n"
+	if err := st.SaveServiceConfig(ctx, &stale, &staleEnv, &stale); !errors.Is(err, ErrServiceConflict) {
+		t.Fatalf("stale environment save = %v, want ErrServiceConflict", err)
+	}
+	got, err := st.GetEnvFile(ctx, svc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != initialEnv {
+		t.Fatalf("environment after stale save = %q, want %q", got, initialEnv)
+	}
+}

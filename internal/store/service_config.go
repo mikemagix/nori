@@ -86,5 +86,10 @@ func (s *Store) saveServiceConfig(ctx context.Context, svc *Service, env *string
 		svc.CreatedAt = now
 	}
 	svc.ID, svc.UpdatedAt = id, now
+	if previous == nil {
+		svc.ConfigVersion = 1
+	} else {
+		svc.ConfigVersion = previous.ConfigVersion + 1
+	}
 	return nil
 }
