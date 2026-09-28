@@ -141,6 +141,9 @@ func (s *Store) PutOAuth(ctx context.Context, r OAuthRecord) error {
 func (s *Store) GetOAuth(ctx context.Context, key, kind string) (OAuthRecord, error) {
 	r := OAuthRecord{Key: key, Kind: kind}
 	err := s.db.QueryRowContext(ctx, `SELECT data,expires,family,used FROM mcp_oauth WHERE key=? AND kind=? AND expires>?`, key, kind, time.Now().Unix()).Scan(&r.Data, &r.Expires, &r.Family, &r.Used)
+	if errors.Is(err, sql.ErrNoRows) {
+		return r, ErrNotFound
+	}
 	return r, err
 }
 
@@ -238,6 +241,29 @@ func (s *Store) ListOAuthRecords(ctx context.Context, kind string) ([]OAuthRecor
 		records = append(records, record)
 	}
 	return records, rows.Err()
+}
+
+// ListOAuthManagedGrantFamilies returns the live legacy families that already
+// have a browser-safe management projection. The OAuth recovery path uses this
+// to avoid reopening a write transaction for every Settings read.
+func (s *Store) ListOAuthManagedGrantFamilies(ctx context.Context) (map[string]struct{}, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT family FROM mcp_oauth WHERE kind=? AND family<>'' AND expires>?`, oauthManagedGrantKind, time.Now().Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	families := make(map[string]struct{})
+	for rows.Next() {
+		var family string
+		if err := rows.Scan(&family); err != nil {
+			return nil, err
+		}
+		families[family] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return families, nil
 }
 
 // BootstrapOAuthGrant persists a projection for a legacy family only when

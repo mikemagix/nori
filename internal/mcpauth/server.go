@@ -93,14 +93,24 @@ func (s *Server) bootstrapOAuthGrantManagement(ctx context.Context) error {
 	if !config.Enabled || config.Epoch == "" || config.PublicURL == "" {
 		return nil
 	}
+	projectedFamilies, err := s.st.ListOAuthManagedGrantFamilies(ctx)
+	if err != nil {
+		return err
+	}
 	codes, err := s.st.ListOAuthRecords(ctx, "code")
 	if err != nil {
 		return err
 	}
 	bootstrap := func(g grant, approvedAt time.Time, scopes string) error {
+		if _, ok := projectedFamilies[g.Family]; ok {
+			return nil
+		}
 		clientRecord, err := s.st.GetOAuth(ctx, digest(g.ClientID), "client")
 		if err != nil {
-			return nil
+			if errors.Is(err, store.ErrNotFound) {
+				return nil
+			}
+			return err
 		}
 		var client storedClient
 		if json.Unmarshal(clientRecord.Data, &client) != nil || client.Client.Name == "" || client.Epoch != config.Epoch || clientRecord.Used {
@@ -117,6 +127,9 @@ func (s *Server) bootstrapOAuthGrantManagement(ctx context.Context) error {
 		})
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			return err
+		}
+		if err == nil {
+			projectedFamilies[g.Family] = struct{}{}
 		}
 		return nil
 	}

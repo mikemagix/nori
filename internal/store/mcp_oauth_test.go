@@ -30,6 +30,14 @@ func containsAny(s string, values ...string) bool {
 	return false
 }
 
+func TestGetOAuthMissingRecordReturnsErrNotFound(t *testing.T) {
+	st := testStore(t)
+	_, err := st.GetOAuth(context.Background(), "missing", "client")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing OAuth record error = %v, want ErrNotFound", err)
+	}
+}
+
 func TestOAuthGrantManagementRevokesExactlyOneFamily(t *testing.T) {
 	st := testStore(t)
 	ctx := context.Background()

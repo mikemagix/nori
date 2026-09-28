@@ -3,6 +3,7 @@ package mcpauth
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -515,6 +516,52 @@ func TestListOAuthGrantManagementBootstrapsLiveCodeGrant(t *testing.T) {
 	}
 	if len(registrations) != 1 || len(registrations[0].Grants) != 1 || registrations[0].Grants[0].ManagementID != managed.ManagementID {
 		t.Fatalf("bootstrap was not idempotent: %+v", registrations)
+	}
+}
+
+func TestBootstrapOAuthGrantManagementSkipsExistingProjectionWrites(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test.db")
+	st, err := store.Open(path, make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.SetMCPConfig(ctx, true, "https://nori.example", false); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := st.GetMCPConfig(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(st, nil)
+	now := time.Now().Truncate(time.Second)
+	cl := storedClient{Client: client{ID: "legacy-client", Name: "Legacy client", Method: "none"}, Epoch: cfg.Epoch}
+	if err := s.put(ctx, cl.Client.ID, "client", "", now.Add(approvedClientLifetime), cl); err != nil {
+		t.Fatal(err)
+	}
+	g := grant{ClientID: cl.Client.ID, Resource: cfg.PublicURL + "/mcp", Scope: ScopeRead, Epoch: cfg.Epoch, Family: "legacy-family", FamilyExpires: now.Add(grantLifetime).Unix()}
+	if err := s.put(ctx, "legacy-code", "code", g.Family, now.Add(authorizationCodeLifetime), g); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ListOAuthGrantManagement(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	lockedDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lockedDB.Close()
+	if _, err := lockedDB.Exec("BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	defer lockedDB.Exec("ROLLBACK")
+
+	checkCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	if err := s.bootstrapOAuthGrantManagement(checkCtx); err != nil {
+		t.Fatalf("existing projection triggered a write while the database was locked: %v", err)
 	}
 }
 
