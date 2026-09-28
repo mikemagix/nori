@@ -132,12 +132,38 @@ func TestRenderPostgresCustomScriptMaterializesDatabaseBeforeApp(t *testing.T) {
 	for _, want := range []string{
 		"db_deadline=$((SECONDS+30))",
 		"timeout 1s docker exec 'nori-8-postgres'",
+		"--restart \"unless-stopped\"",
+		"--env POSTGRES_DB --env POSTGRES_USER --env POSTGRES_PASSWORD",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("script missing postgres/proxy safeguard %q:\n%s", want, script)
 		}
 	}
+	if strings.Contains(script, "--env-file \"$ENV_FILE\" postgres:16.4") {
+		t.Fatalf("database container must not receive the full application environment:\n%s", script)
+	}
 	if strings.Index(script, "docker pull \"postgres:16.4\"") > strings.Index(script, "nori-8-postgres") {
 		t.Fatalf("database must be pulled before it is created:\n%s", script)
+	}
+}
+
+func TestRenderCustomScriptPublishesHostPortWithoutExternalNetwork(t *testing.T) {
+	plan, err := BuildPlan(Input{
+		ServiceID: 9, ServiceName: "api", TargetImage: "example/api@sha256:abc",
+		Config: Config{
+			Mode: ModeSingleContainer, Version: 1, InternalPort: 8080,
+			RestartPolicy: RestartUnlessStopped,
+			Health:        HealthCheck{Command: "true", TimeoutSeconds: 15},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := plan.RenderCustomScript()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(script, " -p 8080:8080") {
+		t.Fatalf("custom conversion must publish the host port without an external network:\n%s", script)
 	}
 }

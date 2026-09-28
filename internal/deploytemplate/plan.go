@@ -406,9 +406,11 @@ func (p Plan) RenderCustomScript() (string, error) {
 	}
 	if p.Database != nil {
 		script.WriteString(fmt.Sprintf("docker pull %q\n", p.Database.Image))
+		for _, key := range p.Database.EnvKeys {
+			script.WriteString(fmt.Sprintf("grep -q '^%s=' \"$ENV_FILE\"\n", key))
+		}
 		passwordKey := p.Database.EnvKeys[len(p.Database.EnvKeys)-1]
-		script.WriteString(fmt.Sprintf("grep -q '^%s=' \"$ENV_FILE\"\n", passwordKey))
-		script.WriteString(fmt.Sprintf("if ! docker container inspect %q >/dev/null 2>&1; then docker run -d --name %q --label nori.service=\"$SERVICE\" --label nori.template=1 --label nori.service-id=%d --label nori.role=db --network %q --mount type=volume,src=%q,dst=/var/lib/postgresql/data --env-file \"$ENV_FILE\" %q; else docker start %q >/dev/null; fi\n", p.Database.Name, p.Database.Name, p.ServiceID, p.InternalNetwork.Name, fmt.Sprintf("nori-%d-volume-postgres-data", p.ServiceID), p.Database.Image, p.Database.Name))
+		script.WriteString(fmt.Sprintf("if ! docker container inspect %q >/dev/null 2>&1; then docker run -d --name %q --label nori.service=\"$SERVICE\" --label nori.template=1 --label nori.service-id=%d --label nori.role=db --restart %q --network %q --mount type=volume,src=%q,dst=/var/lib/postgresql/data --env POSTGRES_DB --env POSTGRES_USER --env %s %q; else docker start %q >/dev/null; fi\n", p.Database.Name, p.Database.Name, p.ServiceID, string(RestartUnlessStopped), p.InternalNetwork.Name, fmt.Sprintf("nori-%d-volume-postgres-data", p.ServiceID), passwordKey, p.Database.Image, p.Database.Name))
 		probeCommand := fmt.Sprintf("psql \"$%s\" -v ON_ERROR_STOP=1 -c 'SELECT 1'", p.Postgres.ConnectionURLEnv)
 		script.WriteString(fmt.Sprintf("db_deadline=$((SECONDS+%d))\ndb_ready=0\nwhile [ \"$SECONDS\" -lt \"$db_deadline\" ]; do\n  if timeout 1s docker exec %s sh -ec %s; then db_ready=1; break; fi\n  sleep 1\ndone\nif [ \"$db_ready\" -ne 1 ]; then echo 'PostgreSQL readiness check failed before application promotion' >&2; exit 1; fi\n", p.Postgres.ReadyTimeoutSeconds, shellQuote(p.Database.Name), shellQuote(probeCommand)))
 	}
@@ -422,6 +424,9 @@ func (p Plan) RenderCustomScript() (string, error) {
 	}
 	for _, network := range p.AppCandidate.Networks {
 		script.WriteString(fmt.Sprintf(" --network %q", network))
+	}
+	if p.Proxy == nil && p.ExternalNetwork == "" {
+		script.WriteString(fmt.Sprintf(" -p %d:%d", p.InternalPort, p.InternalPort))
 	}
 	script.WriteString(" \"$TARGET_IMAGE\"\n")
 	script.WriteString(fmt.Sprintf("health_deadline=$((SECONDS+%d))\nhealth_ok=0\nwhile [ \"$SECONDS\" -lt \"$health_deadline\" ]; do\n", p.Health.TimeoutSeconds))

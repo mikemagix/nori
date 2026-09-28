@@ -77,6 +77,7 @@ func main() {
 	// Build a single notifier instance to share with monitor.
 	nf := buildNotifier(cfg, st)
 	ex := executor.New(st, executor.OSRunner{}, latest, 0)
+	ex.SetDocker(dk)
 	ex.SetNotifier(nf)
 	ex.SetBotName(st.BotName(context.Background()))
 	pl := poller.New(st, latest, ex, cfg.PollInterval)

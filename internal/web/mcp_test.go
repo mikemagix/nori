@@ -13,7 +13,6 @@ import (
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"nori/internal/deploytemplate"
 	"nori/internal/docker"
 	"nori/internal/mcpauth"
 	"nori/internal/store"
@@ -74,6 +73,14 @@ func TestMCPServiceLifecycleAndScopes(t *testing.T) {
 		return res
 	}
 	call("create_service", map[string]any{"name": "app", "watched_image": "nginx:latest", "deploy_script": "echo ok", "env_file": "SECRET='[REDACTED]'"}, false)
+	call("create_service", map[string]any{
+		"name": "strict-template", "watched_image": "nginx:latest", "deployment_mode": "single_container",
+		"template_config": map[string]any{
+			"version": 1, "internal_port": 8080, "restart_policy": "always",
+			"health": map[string]any{"command": "true", "timeout_seconds": 5}, "volums": []any{},
+		},
+		"env_file": "PORT='[REDACTED]'",
+	}, true)
 	svc, err := st.GetServiceByName(ctx, "app")
 	if err != nil {
 		t.Fatal(err)
@@ -245,10 +252,7 @@ func TestMCPServiceLifecycleAndScopes(t *testing.T) {
 
 func TestMCPTemplateConfigurationUsesSharedValidation(t *testing.T) {
 	svc := &store.Service{Name: "api", WatchedImage: "ghcr.io/acme/api:latest", Policy: store.PolicyManual}
-	config := &deploytemplate.Config{
-		Version: 1, InternalPort: 8080, RestartPolicy: deploytemplate.RestartAlways,
-		Health: deploytemplate.HealthCheck{Command: "true", TimeoutSeconds: 5},
-	}
+	config := json.RawMessage(`{"version":1,"internal_port":8080,"restart_policy":"always","health":{"command":"true","timeout_seconds":5}}`)
 	if err := setMCPDeploymentTemplate(svc, string(store.DeploymentModeSingleContainer), config); err != nil {
 		t.Fatal(err)
 	}
@@ -266,11 +270,7 @@ func TestMCPTemplateConfigurationUsesSharedValidation(t *testing.T) {
 		t.Fatal("template configuration must not be accepted for Custom deployment mode")
 	}
 
-	if err := setMCPDeploymentTemplate(svc, string(store.DeploymentModePostgres), &deploytemplate.Config{
-		Version: 1, InternalPort: 8080, RestartPolicy: deploytemplate.RestartAlways,
-		Health:   deploytemplate.HealthCheck{Command: "true", TimeoutSeconds: 5},
-		Postgres: &deploytemplate.PostgresConfig{Image: "postgres:latest"},
-	}); err == nil {
+	if err := setMCPDeploymentTemplate(svc, string(store.DeploymentModePostgres), json.RawMessage(`{"version":1,"internal_port":8080,"restart_policy":"always","health":{"command":"true","timeout_seconds":5},"postgres":{"image":"postgres:latest"}}`)); err == nil {
 		t.Fatal("mutable PostgreSQL image must be rejected through MCP too")
 	}
 }

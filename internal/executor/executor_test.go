@@ -484,6 +484,55 @@ func TestDeploy_TemplatePromotesHealthyCandidateWithoutRunningCustomScript(t *te
 	}
 }
 
+func TestDeploy_TemplateRedeployPublishesPortAfterStoppingCurrent(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	svc := &store.Service{
+		Name:           "api",
+		WatchedImage:   "ghcr.io/acme/api:latest",
+		Policy:         store.PolicyManual,
+		DeploymentMode: store.DeploymentModeSingleContainer,
+		TemplateConfig: `{"version":1,"internal_port":8080,"restart_policy":"always","health":{"command":"true","timeout_seconds":5}}`,
+	}
+	if err := st.CreateService(ctx, svc); err != nil {
+		t.Fatal(err)
+	}
+	current := "nori-" + strconv.FormatInt(svc.ID, 10) + "-app"
+	labels := map[string]string{
+		"nori.service": "api", "nori.template": "1",
+		"nori.service-id": strconv.FormatInt(svc.ID, 10), "nori.role": "app",
+	}
+	dk := &docker.Fake{ManagedContainers: map[string]docker.ManagedContainer{
+		current: {ManagedContainerSpec: docker.ManagedContainerSpec{Name: current, Labels: labels}, State: "running"},
+	}}
+	ex := New(st, &fakeRunner{}, func(context.Context, string) (string, error) { return "sha256:new", nil }, 0)
+	ex.SetDocker(dk)
+
+	id, err := ex.Deploy(ctx, svc.ID, store.TriggerManual)
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if deployment := waitForDeployment(t, st, id); deployment.Status != store.DeploySuccess {
+		t.Fatalf("template redeploy status = %s, log = %q", deployment.Status, deployment.Log)
+	}
+	app := dk.ManagedContainers[current]
+	if app.PublishedPort != 8080 {
+		t.Fatalf("redeployed app published port = %d, want 8080", app.PublishedPort)
+	}
+	stopIndex, createIndex := -1, -1
+	for index, operation := range dk.Operations {
+		if operation == "stop container "+current {
+			stopIndex = index
+		}
+		if operation == "create container "+current+"-candidate" {
+			createIndex = index
+		}
+	}
+	if stopIndex < 0 || createIndex < 0 || stopIndex > createIndex {
+		t.Fatalf("current app must stop before candidate creation, operations = %v", dk.Operations)
+	}
+}
+
 func TestDeploy_TemplateRejectsConcurrentDeployment(t *testing.T) {
 	st := openTestStore(t)
 	ctx := context.Background()
@@ -631,6 +680,49 @@ func TestDeploy_PostgresTemplateReusesOwnedDatabaseAndRecordsIdentity(t *testing
 	}
 	if got := dk.ManagedContainers[databaseName].State; got != "running" {
 		t.Fatalf("database must remain running across application redeploy, got %q", got)
+	}
+}
+
+func TestEnsurePostgresRetriesReadinessProbe(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	svc := &store.Service{
+		Name:           "api",
+		WatchedImage:   "ghcr.io/acme/api:latest",
+		Policy:         store.PolicyManual,
+		DeploymentMode: store.DeploymentModePostgres,
+		TemplateConfig: `{"version":1,"internal_port":8080,"restart_policy":"always","health":{"command":"true","timeout_seconds":5},"postgres":{"image":"postgres:16.4","database":"api","user":"api","password_env":"POSTGRES_PASSWORD","connection_url_env":"DATABASE_URL","ready_timeout_seconds":5}}`,
+	}
+	if err := st.CreateService(ctx, svc); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := deploytemplate.BuildPlan(deploytemplate.Input{
+		ServiceID: svc.ID, ServiceName: svc.Name, TargetImage: "ghcr.io/acme/api@sha256:new",
+		Config: deploytemplate.Config{
+			Mode: deploytemplate.ModePostgres, Version: 1, InternalPort: 8080,
+			RestartPolicy: deploytemplate.RestartAlways,
+			Health:        deploytemplate.HealthCheck{Command: "true", TimeoutSeconds: 5},
+			Postgres: &deploytemplate.PostgresConfig{
+				Image: "postgres:16.4", Database: "api", User: "api",
+				PasswordEnv: "POSTGRES_PASSWORD", ConnectionURLEnv: "DATABASE_URL", ReadyTimeoutSeconds: 5,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dk := &retryProbeClient{Fake: &docker.Fake{}, failures: 2}
+	ex := &Executor{store: st, managed: dk}
+	runtime := postgresRuntime{password: "secret", databaseURL: "postgres://api:secret@nori-postgres/api?sslmode=disable", fingerprint: "fingerprint"}
+	values := map[string]string{"POSTGRES_DB": "api", "POSTGRES_USER": "api", "POSTGRES_PASSWORD": "secret", "DATABASE_URL": runtime.databaseURL}
+	if err := ex.ensurePostgres(ctx, svc, plan, runtime, false, values, io.Discard); err != nil {
+		t.Fatalf("ensurePostgres: %v", err)
+	}
+	dk.mu.Lock()
+	calls := dk.calls
+	dk.mu.Unlock()
+	if calls != 3 {
+		t.Fatalf("readiness probe calls = %d, want 3", calls)
 	}
 }
 

@@ -29,26 +29,26 @@ type mcpID struct {
 	ServiceID int64 `json:"service_id" jsonschema:"Service ID"`
 }
 type mcpCreate struct {
-	Name           string                 `json:"name"`
-	WatchedImage   string                 `json:"watched_image"`
-	DeployScript   string                 `json:"deploy_script,omitempty"`
-	DeploymentMode string                 `json:"deployment_mode,omitempty" jsonschema:"custom, single_container, or postgres; defaults to custom"`
-	TemplateConfig *deploytemplate.Config `json:"template_config,omitempty" jsonschema:"Required for template modes; structured non-secret deployment configuration"`
-	Policy         string                 `json:"policy,omitempty"`
-	CronExpr       string                 `json:"cron_expr,omitempty"`
-	HealthURL      string                 `json:"health_url,omitempty"`
-	EnvFile        *string                `json:"env_file,omitempty" jsonschema:"Dotenv template: every value must be [REDACTED]; insert values with set_service_secret"`
+	Name           string          `json:"name"`
+	WatchedImage   string          `json:"watched_image"`
+	DeployScript   string          `json:"deploy_script,omitempty"`
+	DeploymentMode string          `json:"deployment_mode,omitempty" jsonschema:"custom, single_container, or postgres; defaults to custom"`
+	TemplateConfig json.RawMessage `json:"template_config,omitempty" jsonschema:"Required for template modes; structured non-secret deployment configuration"`
+	Policy         string          `json:"policy,omitempty"`
+	CronExpr       string          `json:"cron_expr,omitempty"`
+	HealthURL      string          `json:"health_url,omitempty"`
+	EnvFile        *string         `json:"env_file,omitempty" jsonschema:"Dotenv template: every value must be [REDACTED]; insert values with set_service_secret"`
 }
 type mcpUpdate struct {
-	ServiceID      int64                  `json:"service_id"`
-	WatchedImage   *string                `json:"watched_image,omitempty"`
-	DeployScript   *string                `json:"deploy_script,omitempty"`
-	DeploymentMode *string                `json:"deployment_mode,omitempty"`
-	TemplateConfig *deploytemplate.Config `json:"template_config,omitempty"`
-	Policy         *string                `json:"policy,omitempty"`
-	CronExpr       *string                `json:"cron_expr,omitempty"`
-	HealthURL      *string                `json:"health_url,omitempty"`
-	EnvFile        *string                `json:"env_file,omitempty" jsonschema:"Dotenv template: every value must be [REDACTED]; omitted keys are removed; insert values with set_service_secret"`
+	ServiceID      int64            `json:"service_id"`
+	WatchedImage   *string          `json:"watched_image,omitempty"`
+	DeployScript   *string          `json:"deploy_script,omitempty"`
+	DeploymentMode *string          `json:"deployment_mode,omitempty"`
+	TemplateConfig *json.RawMessage `json:"template_config,omitempty"`
+	Policy         *string          `json:"policy,omitempty"`
+	CronExpr       *string          `json:"cron_expr,omitempty"`
+	HealthURL      *string          `json:"health_url,omitempty"`
+	EnvFile        *string          `json:"env_file,omitempty" jsonschema:"Dotenv template: every value must be [REDACTED]; omitted keys are removed; insert values with set_service_secret"`
 }
 type mcpHistory struct {
 	ServiceID int64 `json:"service_id"`
@@ -175,7 +175,11 @@ func (s *Server) newMCPHandler() http.Handler {
 		if in.DeploymentMode != nil {
 			mode = *in.DeploymentMode
 		}
-		if err := setMCPDeploymentTemplate(svc, mode, in.TemplateConfig); err != nil {
+		var rawConfig json.RawMessage
+		if in.TemplateConfig != nil {
+			rawConfig = *in.TemplateConfig
+		}
+		if err := setMCPDeploymentTemplate(svc, mode, rawConfig); err != nil {
 			return nil, err
 		}
 		if in.Policy != nil {
@@ -553,7 +557,7 @@ func validateMCPService(ctx context.Context, svc *store.Service, env *string) er
 	return nil
 }
 
-func setMCPDeploymentTemplate(svc *store.Service, rawMode string, config *deploytemplate.Config) error {
+func setMCPDeploymentTemplate(svc *store.Service, rawMode string, rawConfig json.RawMessage) error {
 	mode := rawMode
 	if mode == "" {
 		mode = string(svc.DeploymentMode)
@@ -561,18 +565,14 @@ func setMCPDeploymentTemplate(svc *store.Service, rawMode string, config *deploy
 	if mode == "" {
 		mode = string(store.DeploymentModeCustom)
 	}
-	if config != nil && store.DeploymentMode(mode) == store.DeploymentModeCustom {
+	if rawConfig != nil && store.DeploymentMode(mode) == store.DeploymentModeCustom {
 		return errors.New("template_config requires deployment_mode single_container or postgres")
 	}
-	rawConfig := svc.TemplateConfig
-	if config != nil {
-		encoded, err := json.Marshal(config)
-		if err != nil {
-			return errors.New("could not encode template configuration")
-		}
-		rawConfig = string(encoded)
+	persistedConfig := svc.TemplateConfig
+	if rawConfig != nil {
+		persistedConfig = string(rawConfig)
 	}
-	normalizedMode, normalizedConfig, err := normalizedTemplateConfig(mode, rawConfig)
+	normalizedMode, normalizedConfig, err := normalizedTemplateConfig(mode, persistedConfig)
 	if err != nil {
 		return fmt.Errorf("invalid template configuration: %w", err)
 	}

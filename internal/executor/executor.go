@@ -209,10 +209,10 @@ func (e *Executor) Deploy(ctx context.Context, serviceID int64, trigger string) 
 
 	log.Printf("deploy: %s %q started (id=%d digest=%s)", trigger, svc.Name, deploy.ID, shortDigest(digest))
 	go func() {
-		if isTemplate {
-			defer e.inFlight.Delete(serviceID)
-		}
 		e.runDeploy(svc, deploy, env, envFile, plan)
+		if isTemplate {
+			e.inFlight.Delete(serviceID)
+		}
 	}()
 	templateClaimed = false
 	return deploy.ID, nil
@@ -327,10 +327,25 @@ func (e *Executor) runTemplateDeploy(ctx context.Context, svc *store.Service, pl
 			return fmt.Errorf("remove previous candidate: %w", err)
 		}
 	}
+	currentStopped := false
+	if preflight.current && plan.Proxy == nil && plan.ExternalNetwork == "" {
+		if _, err := fmt.Fprintf(output, "Stopping current application %s to release host port\n", plan.AppCurrent.Name); err != nil {
+			return err
+		}
+		if err := dk.StopContainer(ctx, plan.AppCurrent.Name); err != nil {
+			return fmt.Errorf("stop current application for host port: %w", err)
+		}
+		currentStopped = true
+		defer func() {
+			if currentStopped {
+				_ = dk.StartContainer(context.Background(), plan.AppCurrent.Name)
+			}
+		}()
+	}
 	if _, err := fmt.Fprintf(output, "Creating candidate %s\n", plan.AppCandidate.Name); err != nil {
 		return err
 	}
-	if err := dk.CreateContainer(ctx, applicationSpec(plan, values, !preflight.current)); err != nil {
+	if err := dk.CreateContainer(ctx, applicationSpec(plan, values, true)); err != nil {
 		return fmt.Errorf("create application candidate: %w", err)
 	}
 	if err := dk.StartContainer(ctx, plan.AppCandidate.Name); err != nil {
@@ -347,6 +362,7 @@ func (e *Executor) runTemplateDeploy(ctx context.Context, svc *store.Service, pl
 	if err := promoteCandidate(ctx, dk, plan, preflight); err != nil {
 		return err
 	}
+	currentStopped = false
 	_, err = fmt.Fprintf(output, "Promoted healthy application candidate %s\n", plan.AppCurrent.Name)
 	return err
 }
@@ -618,11 +634,22 @@ func (e *Executor) ensurePostgres(ctx context.Context, svc *store.Service, plan 
 	probeCtx, cancel := context.WithTimeout(ctx, time.Duration(plan.Postgres.ReadyTimeoutSeconds)*time.Second)
 	defer cancel()
 	command := fmt.Sprintf("psql \"$%s\" -v ON_ERROR_STOP=1 -c 'SELECT 1'", plan.Postgres.ConnectionURLEnv)
-	if err := e.managed.RunProbe(probeCtx, docker.ManagedProbe{
-		Image: plan.Database.Image, Network: plan.InternalNetwork.Name,
-		Env: []string{plan.Postgres.ConnectionURLEnv + "=" + runtime.databaseURL}, Command: command,
-	}); err != nil {
-		return fmt.Errorf("PostgreSQL readiness probe: %w", err)
+	var lastErr error
+	for {
+		attemptCtx, cancelAttempt := context.WithTimeout(probeCtx, 10*time.Second)
+		lastErr = e.managed.RunProbe(attemptCtx, docker.ManagedProbe{
+			Image: plan.Database.Image, Network: plan.InternalNetwork.Name,
+			Env: []string{plan.Postgres.ConnectionURLEnv + "=" + runtime.databaseURL}, Command: command,
+		})
+		cancelAttempt()
+		if lastErr == nil {
+			break
+		}
+		select {
+		case <-probeCtx.Done():
+			return fmt.Errorf("PostgreSQL readiness probe: %w", lastErr)
+		case <-time.After(time.Second):
+		}
 	}
 	state, err := e.store.GetTemplateState(ctx, svc.ID)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
