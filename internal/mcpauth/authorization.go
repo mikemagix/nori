@@ -2,6 +2,7 @@ package mcpauth
 
 import (
 	_ "embed"
+	"encoding/json"
 	"html/template"
 	"net/http"
 	"net/url"
@@ -21,7 +22,7 @@ var consentHTML string
 var consent = template.Must(template.New("consent").Parse(consentHTML))
 
 func normalizeScope(raw string) (string, bool) {
-	if raw == "" {
+	if strings.TrimSpace(raw) == "" {
 		return defaultScopes, true
 	}
 	out := []string{}
@@ -92,13 +93,30 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, c store.MCPCo
 	if p.Get("decision") != "allow" {
 		q.Set("error", "access_denied")
 	} else {
-		if err := s.st.ExtendOAuthClient(r.Context(), digest(cl.Client.ID), time.Now().Add(approvedClientLifetime)); err != nil {
+		now := time.Now()
+		code := secret()
+		g := grant{ClientID: cl.Client.ID, Redirect: p.Get("redirect_uri"), Resource: p.Get("resource"), Scope: scope, Challenge: p.Get("code_challenge"), Epoch: c.Epoch, Family: secret(), FamilyExpires: now.Add(grantLifetime).Unix()}
+		data, err := json.Marshal(g)
+		if err != nil {
 			failure(w, 503, "temporarily_unavailable")
 			return
 		}
-		code := secret()
-		g := grant{ClientID: cl.Client.ID, Redirect: p.Get("redirect_uri"), Resource: p.Get("resource"), Scope: scope, Challenge: p.Get("code_challenge"), Epoch: c.Epoch, Family: secret(), FamilyExpires: time.Now().Add(grantLifetime).Unix()}
-		if err := s.put(r.Context(), code, "code", g.Family, time.Now().Add(authorizationCodeLifetime), g); err != nil {
+		if _, err := s.st.ApproveOAuthGrant(r.Context(), store.OAuthGrantApproval{
+			ClientKey:       digest(cl.Client.ID),
+			ClientName:      oauthClientDisplayName(cl.Client.Name),
+			ClientExpiresAt: now.Add(approvedClientLifetime),
+			ApprovedAt:      now,
+			Family:          g.Family,
+			FamilyExpiresAt: time.Unix(g.FamilyExpires, 0),
+			Scopes:          scope,
+			Code: store.OAuthRecord{
+				Key:     digest(code),
+				Kind:    "code",
+				Family:  g.Family,
+				Data:    data,
+				Expires: now.Add(authorizationCodeLifetime).Unix(),
+			},
+		}); err != nil {
 			failure(w, 503, "temporarily_unavailable")
 			return
 		}

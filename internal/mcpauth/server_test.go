@@ -3,6 +3,7 @@ package mcpauth
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -16,6 +17,16 @@ import (
 	"nori/internal/auth"
 	"nori/internal/store"
 )
+
+func TestNormalizeScopeWhitespaceUsesDefaultScopes(t *testing.T) {
+	got, ok := normalizeScope(" \t\n")
+	if !ok {
+		t.Fatal("whitespace-only scope should be treated as an omitted scope")
+	}
+	if got != defaultScopes {
+		t.Fatalf("normalized whitespace-only scope = %q, want %q", got, defaultScopes)
+	}
+}
 
 func TestOAuthFlowAndAttacks(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), make([]byte, 32))
@@ -250,6 +261,444 @@ func TestOAuthFlowAndAttacks(t *testing.T) {
 	}
 	if protect(tokens["access_token"].(string), "nori.example", "") != 401 {
 		t.Fatal("old epoch token accepted")
+	}
+}
+
+func TestAuthorizationCreatesManagedGrantWithOriginalApprovedScopes(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.SetMCPConfig(ctx, true, "https://nori.example", false); err != nil {
+		t.Fatal(err)
+	}
+	hash, _ := auth.HashPassword("password")
+	a, _ := auth.New(hash, make([]byte, 32))
+	s := New(st, a)
+	call := func(method, path, body string, cookies []*http.Cookie) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, "https://nori.example"+path, strings.NewReader(body))
+		if method == http.MethodPost {
+			r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			r.Header.Set("Origin", "https://nori.example")
+		}
+		for _, cookie := range cookies {
+			r.AddCookie(cookie)
+		}
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		return w
+	}
+	registration := call(http.MethodPost, "/oauth/register", `{"client_name":"Calendar agent","redirect_uris":["http://localhost:8765/callback"],"token_endpoint_auth_method":"none"}`, nil)
+	if registration.Code != http.StatusCreated {
+		t.Fatalf("registration: %d %s", registration.Code, registration.Body)
+	}
+	var client map[string]any
+	if err := json.Unmarshal(registration.Body.Bytes(), &client); err != nil {
+		t.Fatal(err)
+	}
+	if registrations, err := s.ListOAuthGrantManagement(ctx); err != nil || len(registrations) != 0 {
+		t.Fatalf("pending registration appeared in management inventory: %+v %v", registrations, err)
+	}
+	clientID := client["client_id"].(string)
+	verifier := strings.Repeat("a", 43)
+	challenge := sha256.Sum256([]byte(verifier))
+	params := url.Values{
+		"client_id":             {clientID},
+		"redirect_uri":          {"http://localhost:8765/callback"},
+		"response_type":         {"code"},
+		"code_challenge_method": {"S256"},
+		"code_challenge":        {base64.RawURLEncoding.EncodeToString(challenge[:])},
+		"resource":              {"https://nori.example/mcp"},
+		"scope":                 {"nori:read nori:write"},
+	}
+	lw := httptest.NewRecorder()
+	lr := httptest.NewRequest(http.MethodPost, "https://nori.example/login", nil)
+	if err := a.Login(lw, lr, "password", false); err != nil {
+		t.Fatal(err)
+	}
+	cookies := lw.Result().Cookies()
+	for _, cookie := range cookies {
+		if cookie.Name == "nori_csrf" {
+			params.Set("csrf_token", cookie.Value)
+		}
+	}
+	if params.Get("csrf_token") == "" {
+		t.Fatal("login did not issue a CSRF token")
+	}
+	issueCode := func() string {
+		t.Helper()
+		params.Set("decision", "allow")
+		w := call(http.MethodPost, "/oauth/authorize", params.Encode(), cookies)
+		if w.Code != http.StatusSeeOther {
+			t.Fatalf("authorize: %d %s", w.Code, w.Body)
+		}
+		redirect, err := url.Parse(w.Header().Get("Location"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		code := redirect.Query().Get("code")
+		if code == "" {
+			t.Fatal("authorization did not issue a code")
+		}
+		return code
+	}
+	code := issueCode()
+	registrations, err := s.ListOAuthGrantManagement(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(registrations) != 1 || len(registrations[0].Grants) != 1 {
+		t.Fatalf("authorization did not create one managed grant: %+v", registrations)
+	}
+	first := registrations[0].Grants[0]
+	if registrations[0].ClientName != "Calendar agent" || first.ClientName != "Calendar agent" || first.ManagementID == "" || first.Scopes != "nori:read nori:write" || first.Status != store.OAuthGrantActive {
+		t.Fatalf("unsafe or incomplete grant projection: %+v", first)
+	}
+	token := url.Values{
+		"client_id":     {clientID},
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"redirect_uri":  {params.Get("redirect_uri")},
+		"resource":      {params.Get("resource")},
+		"code_verifier": {verifier},
+	}
+	tokenResult := call(http.MethodPost, "/oauth/token", token.Encode(), nil)
+	if tokenResult.Code != http.StatusOK {
+		t.Fatalf("code exchange: %d %s", tokenResult.Code, tokenResult.Body)
+	}
+	var tokens tokenResponse
+	if err := json.Unmarshal(tokenResult.Body.Bytes(), &tokens); err != nil {
+		t.Fatal(err)
+	}
+	refresh := url.Values{"client_id": {clientID}, "grant_type": {"refresh_token"}, "refresh_token": {tokens.Refresh}, "resource": {params.Get("resource")}, "scope": {ScopeRead}}
+	narrowed := call(http.MethodPost, "/oauth/token", refresh.Encode(), nil)
+	if narrowed.Code != http.StatusOK {
+		t.Fatalf("narrowed refresh: %d %s", narrowed.Code, narrowed.Body)
+	}
+	registrations, err = s.ListOAuthGrantManagement(ctx)
+	if err != nil || registrations[0].Grants[0].Scopes != "nori:read nori:write" {
+		t.Fatalf("refresh narrowing changed the original approved scopes: %+v %v", registrations, err)
+	}
+	if w := call(http.MethodPost, "/oauth/token", refresh.Encode(), nil); w.Code != http.StatusBadRequest {
+		t.Fatalf("refresh replay: %d %s", w.Code, w.Body)
+	}
+	registrations, err = s.ListOAuthGrantManagement(ctx)
+	if err != nil || registrations[0].Grants[0].ManagementID != first.ManagementID || registrations[0].Grants[0].Status != store.OAuthGrantRevoked {
+		t.Fatalf("refresh replay did not revoke its managed family: %+v %v", registrations, err)
+	}
+	secondCode := issueCode()
+	registrations, err = s.ListOAuthGrantManagement(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(registrations) != 1 || len(registrations[0].Grants) != 2 || registrations[0].Grants[0].ManagementID == registrations[0].Grants[1].ManagementID {
+		t.Fatalf("separate authorization did not create a distinct managed grant: %+v", registrations)
+	}
+	secondToken := url.Values{
+		"client_id":     {clientID},
+		"grant_type":    {"authorization_code"},
+		"code":          {secondCode},
+		"redirect_uri":  {params.Get("redirect_uri")},
+		"resource":      {params.Get("resource")},
+		"code_verifier": {verifier},
+	}
+	secondTokenResult := call(http.MethodPost, "/oauth/token", secondToken.Encode(), nil)
+	if secondTokenResult.Code != http.StatusOK {
+		t.Fatalf("second code exchange: %d %s", secondTokenResult.Code, secondTokenResult.Body)
+	}
+	var secondTokens tokenResponse
+	if err := json.Unmarshal(secondTokenResult.Body.Bytes(), &secondTokens); err != nil {
+		t.Fatal(err)
+	}
+	if w := call(http.MethodPost, "/oauth/revoke", url.Values{"client_id": {clientID}, "token": {secondTokens.Refresh}}.Encode(), nil); w.Code != http.StatusOK {
+		t.Fatalf("self revocation: %d %s", w.Code, w.Body)
+	}
+	registrations, err = s.ListOAuthGrantManagement(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	states := map[string]store.OAuthGrantStatus{}
+	for _, managedGrant := range registrations[0].Grants {
+		states[managedGrant.ManagementID] = managedGrant.Status
+	}
+	if states[first.ManagementID] != store.OAuthGrantRevoked {
+		t.Fatalf("replayed grant status = %q, want revoked", states[first.ManagementID])
+	}
+	for id, status := range states {
+		if id != first.ManagementID && status != store.OAuthGrantRevoked {
+			t.Fatalf("self-revoked grant status = %q, want revoked", status)
+		}
+	}
+}
+
+func TestApprovalFailureLeavesNoCodeOrManagedGrantProjection(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Now().Truncate(time.Second)
+	s := New(st, nil)
+	cl := storedClient{Client: client{ID: "client", Name: "Calendar", Method: "none"}, Epoch: "epoch"}
+	if err := s.put(ctx, cl.Client.ID, "client", "", now.Add(time.Minute), cl); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.put(ctx, "occupied-code", "code", "occupied-family", now.Add(time.Minute), grant{}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.ApproveOAuthGrant(ctx, store.OAuthGrantApproval{
+		ClientKey:       digest(cl.Client.ID),
+		ClientName:      cl.Client.Name,
+		ClientExpiresAt: now.Add(approvedClientLifetime),
+		ApprovedAt:      now,
+		Family:          "new-family",
+		FamilyExpiresAt: now.Add(grantLifetime),
+		Scopes:          ScopeRead,
+		Code: store.OAuthRecord{
+			Key:     digest("occupied-code"),
+			Kind:    "code",
+			Family:  "new-family",
+			Data:    []byte(`{}`),
+			Expires: now.Add(authorizationCodeLifetime).Unix(),
+		},
+	})
+	if err == nil {
+		t.Fatal("approval with an occupied code key succeeded")
+	}
+	if registrations, err := s.ListOAuthGrantManagement(ctx); err != nil || len(registrations) != 0 {
+		t.Fatalf("failed approval left a managed projection: %+v %v", registrations, err)
+	}
+	clientRecord, err := st.GetOAuth(ctx, digest(cl.Client.ID), "client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clientRecord.Expires != now.Add(time.Minute).Unix() {
+		t.Fatalf("failed approval extended client lifetime: %d", clientRecord.Expires)
+	}
+	occupied, err := st.GetOAuth(ctx, digest("occupied-code"), "code")
+	if err != nil || occupied.Family != "occupied-family" {
+		t.Fatalf("failed approval changed the occupied code: %+v %v", occupied, err)
+	}
+}
+
+func TestListOAuthGrantManagementBootstrapsLiveCodeGrant(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.SetMCPConfig(ctx, true, "https://nori.example", false); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := st.GetMCPConfig(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(st, nil)
+	now := time.Now().Truncate(time.Second)
+	cl := storedClient{Client: client{ID: "legacy-client", Method: "none"}, Epoch: cfg.Epoch}
+	if err := s.put(ctx, cl.Client.ID, "client", "", now.Add(approvedClientLifetime), cl); err != nil {
+		t.Fatal(err)
+	}
+	g := grant{ClientID: cl.Client.ID, Resource: cfg.PublicURL + "/mcp", Scope: ScopeRead + " " + ScopeWrite, Epoch: cfg.Epoch, Family: "legacy-family", FamilyExpires: now.Add(grantLifetime).Unix()}
+	if err := s.put(ctx, "legacy-code", "code", g.Family, now.Add(authorizationCodeLifetime), g); err != nil {
+		t.Fatal(err)
+	}
+
+	registrations, err := s.ListOAuthGrantManagement(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(registrations) != 1 || registrations[0].ClientName != "Unnamed client" || len(registrations[0].Grants) != 1 {
+		t.Fatalf("legacy management projection = %+v", registrations)
+	}
+	managed := registrations[0].Grants[0]
+	if managed.Scopes != ScopeRead+" "+ScopeWrite || managed.Status != store.OAuthGrantActive {
+		t.Fatalf("legacy managed grant = %+v", managed)
+	}
+	registrations, err = s.ListOAuthGrantManagement(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(registrations) != 1 || len(registrations[0].Grants) != 1 || registrations[0].Grants[0].ManagementID != managed.ManagementID {
+		t.Fatalf("bootstrap was not idempotent: %+v", registrations)
+	}
+}
+
+func TestBootstrapOAuthGrantManagementSkipsExistingProjectionWrites(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test.db")
+	st, err := store.Open(path, make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.SetMCPConfig(ctx, true, "https://nori.example", false); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := st.GetMCPConfig(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(st, nil)
+	now := time.Now().Truncate(time.Second)
+	cl := storedClient{Client: client{ID: "legacy-client", Name: "Legacy client", Method: "none"}, Epoch: cfg.Epoch}
+	if err := s.put(ctx, cl.Client.ID, "client", "", now.Add(approvedClientLifetime), cl); err != nil {
+		t.Fatal(err)
+	}
+	g := grant{ClientID: cl.Client.ID, Resource: cfg.PublicURL + "/mcp", Scope: ScopeRead, Epoch: cfg.Epoch, Family: "legacy-family", FamilyExpires: now.Add(grantLifetime).Unix()}
+	if err := s.put(ctx, "legacy-code", "code", g.Family, now.Add(authorizationCodeLifetime), g); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ListOAuthGrantManagement(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	lockedDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lockedDB.Close()
+	if _, err := lockedDB.Exec("BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	defer lockedDB.Exec("ROLLBACK")
+
+	checkCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	if err := s.bootstrapOAuthGrantManagement(checkCtx); err != nil {
+		t.Fatalf("existing projection triggered a write while the database was locked: %v", err)
+	}
+}
+
+func TestBootstrapOAuthGrantManagementSkipsTombstonedFamilyBeforeWrite(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test.db")
+	st, err := store.Open(path, make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.SetMCPConfig(ctx, true, "https://nori.example", false); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := st.GetMCPConfig(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(st, nil)
+	now := time.Now().Truncate(time.Second)
+	cl := storedClient{Client: client{ID: "legacy-client", Name: "Legacy client", Method: "none"}, Epoch: cfg.Epoch}
+	if err := s.put(ctx, cl.Client.ID, "client", "", now.Add(approvedClientLifetime), cl); err != nil {
+		t.Fatal(err)
+	}
+	g := grant{ClientID: cl.Client.ID, Resource: cfg.PublicURL + "/mcp", Scope: ScopeRead, Epoch: cfg.Epoch, Family: "revoked-family", FamilyExpires: now.Add(grantLifetime).Unix()}
+	if err := s.put(ctx, "legacy-code", "code", g.Family, now.Add(authorizationCodeLifetime), g); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RevokeOAuthFamily(ctx, g.Family); err != nil {
+		t.Fatal(err)
+	}
+
+	lockedDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lockedDB.Close()
+	if _, err := lockedDB.Exec("BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	defer lockedDB.Exec("ROLLBACK")
+
+	checkCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	if err := s.bootstrapOAuthGrantManagement(checkCtx); err != nil {
+		t.Fatalf("tombstoned family bootstrap error = %v, want a read-only skip without waiting on writer lock", err)
+	}
+}
+
+func TestListOAuthGrantManagementBootstrapsEmptyClientName(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.SetMCPConfig(ctx, true, "https://nori.example", false); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := st.GetMCPConfig(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(st, nil)
+	now := time.Now().Truncate(time.Second)
+	cl := storedClient{Client: client{ID: "unnamed-client", Method: "none"}, Epoch: cfg.Epoch}
+	if err := s.put(ctx, cl.Client.ID, "client", "", now.Add(approvedClientLifetime), cl); err != nil {
+		t.Fatal(err)
+	}
+	g := grant{ClientID: cl.Client.ID, Resource: cfg.PublicURL + "/mcp", Scope: ScopeRead, Epoch: cfg.Epoch, Family: "unnamed-family", FamilyExpires: now.Add(grantLifetime).Unix()}
+	if err := s.put(ctx, "unnamed-code", "code", g.Family, now.Add(authorizationCodeLifetime), g); err != nil {
+		t.Fatal(err)
+	}
+
+	registrations, err := s.ListOAuthGrantManagement(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(registrations) != 1 || registrations[0].ClientName != "Unnamed client" || len(registrations[0].Grants) != 1 || registrations[0].Grants[0].ClientName != "Unnamed client" {
+		t.Fatalf("empty-name legacy management projection = %+v", registrations)
+	}
+}
+
+func TestListOAuthGrantManagementBootstrapsLiveRefreshGrant(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.SetMCPConfig(ctx, true, "https://nori.example", false); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := st.GetMCPConfig(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(st, nil)
+	now := time.Now().Truncate(time.Second)
+	cl := storedClient{Client: client{ID: "legacy-client", Name: "Legacy client", Method: "none"}, Epoch: cfg.Epoch}
+	if err := s.put(ctx, cl.Client.ID, "client", "", now.Add(approvedClientLifetime), cl); err != nil {
+		t.Fatal(err)
+	}
+	g := grant{ClientID: cl.Client.ID, Resource: cfg.PublicURL + "/mcp", Epoch: cfg.Epoch, Family: "legacy-family", FamilyExpires: now.Add(grantLifetime).Unix()}
+	for _, record := range []struct {
+		key   string
+		scope string
+	}{
+		{key: "legacy-refresh-read", scope: ScopeRead},
+		{key: "legacy-refresh-write", scope: ScopeWrite},
+	} {
+		g.Scope = record.scope
+		if err := s.put(ctx, record.key, "refresh", g.Family, time.Unix(g.FamilyExpires, 0), g); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	registrations, err := s.ListOAuthGrantManagement(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(registrations) != 1 || registrations[0].ClientName != "Legacy client" || len(registrations[0].Grants) != 1 {
+		t.Fatalf("legacy refresh management projection = %+v", registrations)
+	}
+	managed := registrations[0].Grants[0]
+	if managed.Scopes != ScopeRead+" "+ScopeWrite || managed.Status != store.OAuthGrantActive {
+		t.Fatalf("legacy refresh managed grant = %+v", managed)
 	}
 }
 
