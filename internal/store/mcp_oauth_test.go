@@ -38,6 +38,28 @@ func TestGetOAuthMissingRecordReturnsErrNotFound(t *testing.T) {
 	}
 }
 
+func TestListOAuthRecordsExceptFamiliesFiltersBeforeReturningRows(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+	now := time.Now().Add(time.Hour).Unix()
+	for _, record := range []OAuthRecord{
+		{Key: "kept", Kind: "refresh", Family: "kept-family", Data: []byte(`{"family":"kept"}`), Expires: now},
+		{Key: "skipped", Kind: "refresh", Family: "projected-family", Data: []byte(`{"family":"skipped"}`), Expires: now},
+	} {
+		if err := st.PutOAuth(ctx, record); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	records, err := st.ListOAuthRecordsExceptFamilies(ctx, "refresh", map[string]struct{}{"projected-family": {}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].Key != "kept" {
+		t.Fatalf("filtered refresh records = %+v", records)
+	}
+}
+
 func TestOAuthGrantManagementRevokesExactlyOneFamily(t *testing.T) {
 	st := testStore(t)
 	ctx := context.Background()

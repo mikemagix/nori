@@ -22,7 +22,7 @@ var consentHTML string
 var consent = template.Must(template.New("consent").Parse(consentHTML))
 
 func normalizeScope(raw string) (string, bool) {
-	if raw == "" {
+	if strings.TrimSpace(raw) == "" {
 		return defaultScopes, true
 	}
 	out := []string{}

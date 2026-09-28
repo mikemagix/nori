@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -226,7 +227,27 @@ func (s *Store) ApproveOAuthGrant(ctx context.Context, a OAuthGrantApproval) (OA
 // ListOAuthRecords is restricted to the OAuth server's recovery path. The
 // Settings layer receives only the dedicated management projection methods.
 func (s *Store) ListOAuthRecords(ctx context.Context, kind string) ([]OAuthRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT key,data,expires,family,used FROM mcp_oauth WHERE kind=? AND expires>?`, kind, time.Now().Unix())
+	return s.ListOAuthRecordsExceptFamilies(ctx, kind, nil)
+}
+
+// ListOAuthRecordsExceptFamilies is restricted to the OAuth server's recovery
+// path. It avoids loading retained records for families that already have a
+// browser-safe management projection.
+func (s *Store) ListOAuthRecordsExceptFamilies(ctx context.Context, kind string, excluded map[string]struct{}) ([]OAuthRecord, error) {
+	query := `SELECT key,data,expires,family,used FROM mcp_oauth WHERE kind=? AND expires>?`
+	args := []any{kind, time.Now().Unix()}
+	if len(excluded) > 0 {
+		families := make([]string, 0, len(excluded))
+		for family := range excluded {
+			families = append(families, family)
+		}
+		sort.Strings(families)
+		query += ` AND family NOT IN (` + strings.TrimRight(strings.Repeat("?,", len(families)), ",") + `)`
+		for _, family := range families {
+			args = append(args, family)
+		}
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

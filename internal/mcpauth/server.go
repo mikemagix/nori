@@ -148,7 +148,7 @@ func (s *Server) bootstrapOAuthGrantManagement(ctx context.Context) error {
 			return err
 		}
 	}
-	refreshes, err := s.st.ListOAuthRecords(ctx, "refresh")
+	refreshes, err := s.st.ListOAuthRecordsExceptFamilies(ctx, "refresh", projectedFamilies)
 	if err != nil {
 		return err
 	}

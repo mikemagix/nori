@@ -18,6 +18,16 @@ import (
 	"nori/internal/store"
 )
 
+func TestNormalizeScopeWhitespaceUsesDefaultScopes(t *testing.T) {
+	got, ok := normalizeScope(" \t\n")
+	if !ok {
+		t.Fatal("whitespace-only scope should be treated as an omitted scope")
+	}
+	if got != defaultScopes {
+		t.Fatalf("normalized whitespace-only scope = %q, want %q", got, defaultScopes)
+	}
+}
+
 func TestOAuthFlowAndAttacks(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), make([]byte, 32))
 	if err != nil {
