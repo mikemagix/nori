@@ -621,8 +621,17 @@ func (s *Server) handleServiceCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	svc.DeploymentMode, svc.TemplateConfig = mode, config
-	if err := s.store.SaveServiceConfig(r.Context(), svc, &form.EnvFile, nil); err != nil {
-		_ = ServiceFormPage(form, s.csrf(r), false, "/services", err.Error()).Render(r.Context(), w)
+	if _, err := s.saveOrdinaryService(r.Context(), ordinaryWrite{Service: svc, Environment: &form.EnvFile, EnvironmentMode: dashboardEnvironment}); err != nil {
+		var validationErr *ordinaryValidationError
+		if errors.As(err, &validationErr) {
+			_ = ServiceFormPage(form, s.csrf(r), false, "/services", validationErr.Error()).Render(r.Context(), w)
+			return
+		}
+		if _, lookupErr := s.store.GetServiceByName(r.Context(), svc.Name); lookupErr == nil {
+			_ = ServiceFormPage(form, s.csrf(r), false, "/services", "A service with that name already exists.").Render(r.Context(), w)
+			return
+		}
+		_ = ServiceFormPage(form, s.csrf(r), false, "/services", "No changes were saved. Try again.").Render(r.Context(), w)
 		return
 	}
 	log.Printf("service: created %q (image=%s policy=%s)", svc.Name, svc.WatchedImage, svc.Policy)
@@ -1015,6 +1024,7 @@ func serviceForm(svc *store.Service) ServiceFormData {
 	return ServiceFormData{
 		Name: svc.Name, WatchedImage: svc.WatchedImage, Policy: string(svc.Policy),
 		CronExpr: svc.CronExpr, DeployScript: svc.DeployScript, HealthURL: svc.HealthURL, IsSelf: svc.IsSelf,
+		ConfigVersion:  svc.ConfigVersion,
 		DeploymentMode: string(svc.DeploymentMode), TemplateConfig: svc.TemplateConfig,
 	}
 }
@@ -1038,11 +1048,13 @@ func parseServiceForm(r *http.Request) ServiceFormData {
 			templateConfig = value
 		}
 	}
+	configVersion, _ := strconv.ParseInt(r.FormValue("expected_config_version"), 10, 64)
 	return ServiceFormData{
 		Name: r.FormValue("name"), WatchedImage: r.FormValue("watched_image"),
 		Policy: r.FormValue("policy"), CronExpr: r.FormValue("cron_expr"), HealthURL: r.FormValue("health_url"),
 		DeployScript:   executor.NormalizeNewlines(r.FormValue("deploy_script")),
 		EnvFile:        executor.NormalizeNewlines(r.FormValue("env_file")),
+		ConfigVersion:  configVersion,
 		DeploymentMode: mode, TemplateConfig: executor.NormalizeNewlines(templateConfig),
 	}
 }

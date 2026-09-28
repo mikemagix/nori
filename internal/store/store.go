@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS service (
 	is_self INTEGER NOT NULL DEFAULT 0,
 	deployment_mode TEXT NOT NULL DEFAULT 'custom',
 	template_config TEXT NOT NULL DEFAULT '{}',
+	config_version INTEGER NOT NULL DEFAULT 1,
 	created_at INTEGER NOT NULL,
 	updated_at INTEGER NOT NULL
 );
@@ -115,6 +116,7 @@ func migrate(db *sql.DB) error {
 	hasHealth := false
 	hasDeploymentMode := false
 	hasTemplateConfig := false
+	hasConfigVersion := false
 	for rows.Next() {
 		var cid int
 		var name, typ string
@@ -134,6 +136,9 @@ func migrate(db *sql.DB) error {
 		}
 		if name == "template_config" {
 			hasTemplateConfig = true
+		}
+		if name == "config_version" {
+			hasConfigVersion = true
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -156,6 +161,11 @@ func migrate(db *sql.DB) error {
 	}
 	if !hasTemplateConfig {
 		if _, err := db.Exec(`ALTER TABLE service ADD COLUMN template_config TEXT NOT NULL DEFAULT '{}'`); err != nil {
+			return err
+		}
+	}
+	if !hasConfigVersion {
+		if _, err := db.Exec(`ALTER TABLE service ADD COLUMN config_version INTEGER NOT NULL DEFAULT 1`); err != nil {
 			return err
 		}
 	}

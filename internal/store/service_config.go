@@ -48,7 +48,7 @@ func (s *Store) saveServiceConfig(ctx context.Context, svc *Service, env *string
 	now := time.Now().UTC()
 	id := svc.ID
 	if id == 0 {
-		res, err := tx.ExecContext(ctx, `INSERT INTO service (name,watched_image,policy,cron_expr,deploy_script,health_url,is_self,deployment_mode,template_config,created_at,updated_at) VALUES (?,?,?,?,?,?,0,?,?,?,?)`, svc.Name, svc.WatchedImage, svc.Policy, svc.CronExpr, svc.DeployScript, svc.HealthURL, svc.DeploymentMode, svc.TemplateConfig, now.Unix(), now.Unix())
+		res, err := tx.ExecContext(ctx, `INSERT INTO service (name,watched_image,policy,cron_expr,deploy_script,health_url,is_self,deployment_mode,template_config,config_version,created_at,updated_at) VALUES (?,?,?,?,?,?,0,?,?,1,?,?)`, svc.Name, svc.WatchedImage, svc.Policy, svc.CronExpr, svc.DeployScript, svc.HealthURL, svc.DeploymentMode, svc.TemplateConfig, now.Unix(), now.Unix())
 		if err != nil {
 			return err
 		}
@@ -62,7 +62,7 @@ func (s *Store) saveServiceConfig(ctx context.Context, svc *Service, env *string
 		}
 		expected := *previous
 		normalizeDeploymentConfig(&expected)
-		res, err := tx.ExecContext(ctx, `UPDATE service SET watched_image=?,policy=?,cron_expr=?,deploy_script=?,health_url=?,deployment_mode=?,template_config=?,updated_at=? WHERE id=? AND name=? AND is_self=0 AND watched_image=? AND policy=? AND cron_expr=? AND deploy_script=? AND health_url=? AND deployment_mode=? AND template_config=?`, svc.WatchedImage, svc.Policy, svc.CronExpr, svc.DeployScript, svc.HealthURL, svc.DeploymentMode, svc.TemplateConfig, now.Unix(), id, svc.Name, expected.WatchedImage, expected.Policy, expected.CronExpr, expected.DeployScript, expected.HealthURL, expected.DeploymentMode, expected.TemplateConfig)
+		res, err := tx.ExecContext(ctx, `UPDATE service SET watched_image=?,policy=?,cron_expr=?,deploy_script=?,health_url=?,deployment_mode=?,template_config=?,updated_at=?,config_version=config_version+1 WHERE id=? AND name=? AND is_self=0 AND config_version=?`, svc.WatchedImage, svc.Policy, svc.CronExpr, svc.DeployScript, svc.HealthURL, svc.DeploymentMode, svc.TemplateConfig, now.Unix(), id, svc.Name, expected.ConfigVersion)
 		if err != nil {
 			return err
 		}

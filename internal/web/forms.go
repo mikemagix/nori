@@ -58,6 +58,8 @@ type ServiceFormData struct {
 	DeployScript    string
 	EnvFile         string
 	HealthURL       string
+	ConfigVersion   int64
+	ReloadURL       string
 	IsSelf          bool
 	DeploymentMode  string
 	TemplateConfig  string

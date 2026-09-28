@@ -40,15 +40,16 @@ type mcpCreate struct {
 	EnvFile        *string         `json:"env_file,omitempty" jsonschema:"Dotenv template: every value must be [REDACTED]; insert values with set_service_secret"`
 }
 type mcpUpdate struct {
-	ServiceID      int64            `json:"service_id"`
-	WatchedImage   *string          `json:"watched_image,omitempty"`
-	DeployScript   *string          `json:"deploy_script,omitempty"`
-	DeploymentMode *string          `json:"deployment_mode,omitempty"`
-	TemplateConfig *json.RawMessage `json:"template_config,omitempty"`
-	Policy         *string          `json:"policy,omitempty"`
-	CronExpr       *string          `json:"cron_expr,omitempty"`
-	HealthURL      *string          `json:"health_url,omitempty"`
-	EnvFile        *string          `json:"env_file,omitempty" jsonschema:"Dotenv template: every value must be [REDACTED]; omitted keys are removed; insert values with set_service_secret"`
+	ServiceID             int64            `json:"service_id"`
+	ExpectedConfigVersion int64            `json:"expected_config_version" jsonschema:"Configuration generation returned by get_service; required for updates"`
+	WatchedImage          *string          `json:"watched_image,omitempty"`
+	DeployScript          *string          `json:"deploy_script,omitempty"`
+	DeploymentMode        *string          `json:"deployment_mode,omitempty"`
+	TemplateConfig        *json.RawMessage `json:"template_config,omitempty"`
+	Policy                *string          `json:"policy,omitempty"`
+	CronExpr              *string          `json:"cron_expr,omitempty"`
+	HealthURL             *string          `json:"health_url,omitempty"`
+	EnvFile               *string          `json:"env_file,omitempty" jsonschema:"Dotenv template: every value must be [REDACTED]; omitted keys are removed; insert values with set_service_secret"`
 }
 type mcpHistory struct {
 	ServiceID int64 `json:"service_id"`
@@ -162,6 +163,9 @@ func (s *Server) newMCPHandler() http.Handler {
 		return svc, nil
 	})
 	addNoriTool(s, server, "update_service", "Update supplied configuration fields; omitted fields are preserved and names are immutable. Templates use the same typed validation as the dashboard.", mcpauth.ScopeWrite, func(ctx context.Context, in mcpUpdate) (any, error) {
+		if in.ExpectedConfigVersion <= 0 {
+			return nil, errors.New("expected_config_version is required")
+		}
 		svc, err := s.mcpService(ctx, in.ServiceID, true)
 		if err != nil {
 			return nil, err
@@ -533,7 +537,11 @@ func validateMCPService(ctx context.Context, svc *store.Service, env *string) er
 	if mode != store.DeploymentModeCustom && !deploytemplate.ValidServiceName(svc.Name) {
 		return errors.New("template service name must match [A-Za-z0-9][A-Za-z0-9_.-]{0,62}")
 	}
-	if !mcpServiceName.MatchString(svc.Name) || svc.Name == store.SelfServiceName {
+	return validateOrdinaryService(ctx, svc, env, true, true)
+}
+
+func validateOrdinaryService(ctx context.Context, svc *store.Service, env *string, template, validateName bool) error {
+	if validateName && (!mcpServiceName.MatchString(svc.Name) || svc.Name == store.SelfServiceName) {
 		return errors.New("invalid or reserved service name")
 	}
 	if strings.TrimSpace(svc.WatchedImage) == "" || len(svc.WatchedImage) > 512 {

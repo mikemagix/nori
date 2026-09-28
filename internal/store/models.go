@@ -29,6 +29,7 @@ type Service struct {
 	HealthURL      string
 	DeploymentMode DeploymentMode
 	TemplateConfig string
+	ConfigVersion  int64 `json:"config_version"`
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 }
