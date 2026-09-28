@@ -12,6 +12,7 @@ templ Layout(title string, csrf string, content templ.Component) {
 			<link rel="stylesheet" href="/static/app.css"/>
 			<script src="/static/htmx.min.js" defer></script>
 			<script src="/static/editor.js" type="module"></script>
+			<script src="/static/template-form.js" type="module"></script>
 			if title == "Terminal" {
 				<link rel="stylesheet" href="/static/terminal.css"/>
 				<script src="/static/terminal.js" type="module"></script>

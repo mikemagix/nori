@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"nori/internal/deploytemplate"
 	"nori/internal/docker"
 	"nori/internal/mcpauth"
 	"nori/internal/store"
@@ -44,7 +45,7 @@ func TestMCPServiceLifecycleAndScopes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(listed.Tools) != 14 {
+	if len(listed.Tools) != 16 {
 		t.Fatalf("tools=%d", len(listed.Tools))
 	}
 	call := func(name string, args map[string]any, wantError bool) *mcp.CallToolResult {
@@ -225,6 +226,35 @@ func TestMCPServiceLifecycleAndScopes(t *testing.T) {
 	call("delete_service", args, false)
 	if _, err := st.GetService(ctx, svc.ID); err != store.ErrNotFound {
 		t.Fatalf("not deleted: %v", err)
+	}
+}
+
+func TestMCPTemplateConfigurationUsesSharedValidation(t *testing.T) {
+	svc := &store.Service{Name: "api", WatchedImage: "ghcr.io/acme/api:latest", Policy: store.PolicyManual}
+	config := &deploytemplate.Config{
+		Version: 1, InternalPort: 8080, RestartPolicy: deploytemplate.RestartAlways,
+		Health: deploytemplate.HealthCheck{Command: "true", TimeoutSeconds: 5},
+	}
+	if err := setMCPDeploymentTemplate(svc, string(store.DeploymentModeSingleContainer), config); err != nil {
+		t.Fatal(err)
+	}
+	env := "PORT='[REDACTED]'\n"
+	if err := validateMCPService(context.Background(), svc, &env); err != nil {
+		t.Fatalf("valid template MCP input rejected: %v", err)
+	}
+	if svc.DeploymentMode != store.DeploymentModeSingleContainer || !strings.Contains(svc.TemplateConfig, `"internal_port":8080`) {
+		t.Fatalf("template configuration was not normalized: %+v", svc)
+	}
+	if svc.DeployScript != "" {
+		t.Fatalf("template service should not require a Custom script, got %q", svc.DeployScript)
+	}
+
+	if err := setMCPDeploymentTemplate(svc, string(store.DeploymentModePostgres), &deploytemplate.Config{
+		Version: 1, InternalPort: 8080, RestartPolicy: deploytemplate.RestartAlways,
+		Health:   deploytemplate.HealthCheck{Command: "true", TimeoutSeconds: 5},
+		Postgres: &deploytemplate.PostgresConfig{Image: "postgres:latest"},
+	}); err == nil {
+		t.Fatal("mutable PostgreSQL image must be rejected through MCP too")
 	}
 }
 

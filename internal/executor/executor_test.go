@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"nori/internal/deploytemplate"
 	"nori/internal/docker"
 	"nori/internal/notify"
 	"nori/internal/store"
@@ -580,6 +581,38 @@ func TestDeploy_PostgresReadinessFailureKeepsCurrentAppAndRedactsSecrets(t *test
 	if strings.Contains(deployment.Log, secret) {
 		t.Fatalf("deployment log leaked database secret: %q", deployment.Log)
 	}
+}
+
+func TestApplicationSpecAddsProxyConfigurationWithoutMutatingServiceEnvironment(t *testing.T) {
+	plan, err := deploytemplate.BuildPlan(deploytemplate.Input{
+		ServiceID: 1, ServiceName: "api", TargetImage: "ghcr.io/acme/api@sha256:new",
+		Config: deploytemplate.Config{
+			Mode: deploytemplate.ModeSingleContainer, Version: 1, InternalPort: 8080,
+			RestartPolicy: deploytemplate.RestartAlways, ServingNetwork: "proxy",
+			Proxy:  &deploytemplate.ProxyConfig{Network: "proxy", Domain: "api.example.test", Port: 8080},
+			Health: deploytemplate.HealthCheck{Command: "true", TimeoutSeconds: 5},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serviceEnv := map[string]string{"SECRET": "s3cret"}
+	spec := applicationSpec(plan, serviceEnv)
+	if !containsEnv(spec.Env, "VIRTUAL_HOST=api.example.test") || !containsEnv(spec.Env, "VIRTUAL_PORT=8080") {
+		t.Fatalf("proxy settings missing from container environment: %v", spec.Env)
+	}
+	if _, ok := serviceEnv["VIRTUAL_HOST"]; ok {
+		t.Fatalf("template-only proxy settings mutated the service environment: %+v", serviceEnv)
+	}
+}
+
+func containsEnv(env []string, want string) bool {
+	for _, item := range env {
+		if item == want {
+			return true
+		}
+	}
+	return false
 }
 
 func containsOperation(operations []string, want string) bool {

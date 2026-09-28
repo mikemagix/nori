@@ -30,7 +30,7 @@ templ serviceFormContent(form ServiceFormData, csrf string, isEdit bool, action 
 			<span>{ errMsg }</span>
 		</div>
 	}
-	<form id="service-form" method="post" action={ templ.SafeURL(action) } class="service-form">
+	<form id="service-form" method="post" action={ templ.SafeURL(action) } class="service-form" data-deployment-form>
 		<input type="hidden" name="csrf_token" value={ csrf }/>
 		<section class="panel form-panel">
 			<div class="panel-heading">
@@ -74,10 +74,21 @@ templ serviceFormContent(form ServiceFormData, csrf string, isEdit bool, action 
 					<input id="health-url" name="health_url" value={ form.HealthURL } placeholder="https://service.example/health"/>
 					<span class="field-help">Optional health probe URL. If empty, no per-service probe is performed.</span>
 				</div>
+				if !form.IsSelf {
+					<div class="field">
+						<label for="deployment-mode">Deployment mode</label>
+						<select id="deployment-mode" name="deployment_mode" data-deployment-mode>
+							<option value="custom" selected?={ form.DeploymentMode == "custom" }>Custom deployment script</option>
+							<option value="single_container" selected?={ form.DeploymentMode == "single_container" }>Single container</option>
+							<option value="postgres" selected?={ form.DeploymentMode == "postgres" }>Application with PostgreSQL</option>
+						</select>
+						<span class="field-help">Templates manage an owned Docker lifecycle; Custom keeps the current Bash contract.</span>
+					</div>
+				}
 			</div>
 		</section>
 
-		<div class="editor-grid">
+		<div class="editor-grid" data-deployment-mode-panel="custom" hidden?={ !form.IsSelf && form.DeploymentMode != "custom" }>
 		<section class="panel editor-panel">
 			<div class="panel-heading">
 				<div>
@@ -98,7 +109,25 @@ templ serviceFormContent(form ServiceFormData, csrf string, isEdit bool, action 
 				<span><kbd>⌘</kbd><kbd>S</kbd> to save</span>
 			</div>
 		</section>
+		</div>
 
+		<section class="panel form-panel" data-deployment-mode-panel="single_container" hidden?={ form.DeploymentMode != "single_container" }>
+			<div class="panel-heading"><div><h2>Single-container template</h2><p>Structured configuration for the managed application container. Values in the environment editor remain encrypted and are never included here.</p></div><span class="step-number">02</span></div>
+			<div class="form-grid"><div class="field form-notes"><label for="template-config">Template configuration</label><textarea id="template-config" name="template_config_single" class="code-editor" spellcheck="false" aria-label="Single-container template configuration" placeholder='{"version":1,"internal_port":8080,"restart_policy":"unless-stopped","health":{"url":"https://app.example/health","timeout_seconds":30}}'>{ form.TemplateConfig }</textarea><span class="field-help">Use a versioned JSON object. Include named volumes, serving network, proxy settings, and exactly one bounded health URL or command when needed.</span></div></div>
+			if form.TemplatePreview != "" {
+				<div class="form-notes"><span class="field-help">Read-only deployment preview</span><pre class="history-preview">{ form.TemplatePreview }</pre></div>
+			}
+		</section>
+
+		<section class="panel form-panel" data-deployment-mode-panel="postgres" hidden?={ form.DeploymentMode != "postgres" }>
+			<div class="panel-heading"><div><h2>Application with PostgreSQL</h2><p>Use the same structured application fields plus an explicit PostgreSQL image and environment key bindings.</p></div><span class="step-number">02</span></div>
+			<div class="form-grid"><div class="field form-notes"><label for="template-config-postgres">Template configuration</label><textarea id="template-config-postgres" name="template_config_postgres" class="code-editor" spellcheck="false" aria-label="PostgreSQL template configuration" placeholder='{"version":1,"internal_port":8080,"restart_policy":"unless-stopped","health":{"command":"curl -f http://localhost:8080/health","timeout_seconds":30},"postgres":{"image":"postgres:16.4","database":"app","user":"app","password_env":"POSTGRES_PASSWORD","connection_url_env":"DATABASE_URL","ready_timeout_seconds":30}}'>{ form.TemplateConfig }</textarea><span class="field-help">Nori creates only labeled private database resources and requires a matching private connection URL before changing the application.</span></div></div>
+			if form.TemplatePreview != "" {
+				<div class="form-notes"><span class="field-help">Read-only deployment preview</span><pre class="history-preview">{ form.TemplatePreview }</pre></div>
+			}
+		</section>
+
+		<div class="editor-grid">
 		<section class="panel editor-panel">
 			<div class="panel-heading">
 				<div>
@@ -135,6 +164,12 @@ templ serviceFormContent(form ServiceFormData, csrf string, isEdit bool, action 
 			<button class="button button-primary" type="submit">Save service</button>
 		</div>
 	</form>
+	if isEdit && !form.IsSelf && form.DeploymentMode != "custom" {
+		<section class="danger-zone">
+			<div><h2>Convert to Custom script</h2><p>This one-way conversion writes an inspectable Bash script and stops structured template management.</p></div>
+			<form method="post" action={ templ.SafeURL("/services/" + form.Name + "/convert-to-custom") }><input type="hidden" name="csrf_token" value={ csrf }/><button class="button button-secondary" type="submit" onclick="return confirm('Convert this managed template to a Custom script?')">Convert to Custom</button></form>
+		</section>
+	}
 	if isEdit && !form.IsSelf {
 		<section class="danger-zone">
 			<div>

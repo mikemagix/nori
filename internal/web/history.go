@@ -48,7 +48,7 @@ func (s *Server) handleConfigHistory(w http.ResponseWriter, r *http.Request) {
 
 // Copying only prepares an unsaved form. No secret contents travel in URLs.
 func (s *Server) newServiceForm(w http.ResponseWriter, r *http.Request) (ServiceFormData, bool) {
-	form := ServiceFormData{Policy: "manual"}
+	form := ServiceFormData{Policy: "manual", DeploymentMode: string(store.DeploymentModeCustom)}
 	source := r.URL.Query().Get("source")
 	if source == "" {
 		return form, true

@@ -447,13 +447,17 @@ func asManagedResource(resource deploytemplate.Resource) docker.ManagedResource 
 }
 
 func applicationSpec(plan deploytemplate.Plan, values map[string]string) docker.ManagedContainerSpec {
+	containerEnv := make(map[string]string, len(values)+2)
+	for key, value := range values {
+		containerEnv[key] = value
+	}
 	if plan.Proxy != nil {
-		values["VIRTUAL_HOST"] = plan.Proxy.Domain
-		values["VIRTUAL_PORT"] = fmt.Sprintf("%d", plan.Proxy.Port)
+		containerEnv["VIRTUAL_HOST"] = plan.Proxy.Domain
+		containerEnv["VIRTUAL_PORT"] = fmt.Sprintf("%d", plan.Proxy.Port)
 	}
 	spec := docker.ManagedContainerSpec{
 		Name: plan.AppCandidate.Name, Image: plan.AppCandidate.Image, Labels: plan.AppCandidate.Labels,
-		Env: sortedEnvironment(values), Networks: append([]string(nil), plan.AppCandidate.Networks...),
+		Env: sortedEnvironment(containerEnv), Networks: append([]string(nil), plan.AppCandidate.Networks...),
 		RestartPolicy: string(plan.AppCandidate.RestartPolicy),
 	}
 	for _, mount := range plan.AppCandidate.Mounts {

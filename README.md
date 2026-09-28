@@ -238,6 +238,45 @@ Environment history is encrypted too. Existing installations start with their cu
 configuration as the first version, and deleting a service removes its history.
 The managed self-service versions only editable launcher environment values.
 
+### Deployment templates
+
+Alongside **Custom deployment script**, ordinary services can use two managed
+templates: **Single container** and **Application with PostgreSQL**. Template
+configuration is a versioned, non-secret JSON object stored separately from the
+encrypted `.env` document. The Dashboard provides a read-only action preview;
+MCP provides the same structure through `template_config` and
+`preview_service_template`.
+
+For a single container, configure an internal port, restart policy, optional
+serving/proxy network, named-volume mounts, and exactly one bounded health URL
+or container-local health command. Nori pulls the exact digest before changing
+runtime state, verifies every deterministic resource name is already owned by
+the same service, starts a candidate, and only promotes it after health passes.
+On a failed start or health check it removes the candidate and leaves the
+serving container in place.
+
+The PostgreSQL template adds an explicit, non-`latest` PostgreSQL image, a
+private labeled network, a persistent labeled data volume, database/user
+bindings, and a bounded authenticated probe using `DATABASE_URL`. Both
+`POSTGRES_DB`/`POSTGRES_USER` and the URL must agree with the structured
+configuration. Nori reuses a healthy owned database on application redeploys;
+it never removes its volume during application rollback. Changing the database
+identity or PostgreSQL major version after initialization is a migration, not
+an ordinary template edit: convert to Custom and perform that migration
+deliberately.
+
+Nori creates or adopts only resources carrying the service, template, immutable
+service-ID, and role ownership labels. The configured external proxy network is
+attach-only: it must already exist and is never created or deleted by Nori.
+Environment values travel to Docker through its API boundary and never appear
+in the preview, deployment output, or MCP responses.
+
+**Convert to Custom** is an explicit one-way action in the service form and
+through `convert_service_to_custom` in MCP. It materializes an inspectable
+Bash script while preserving the encrypted environment, then stops structured
+template management. Prefer Custom whenever the service needs behavior beyond
+these two intentionally bounded layouts.
+
 ## Per-service contract
 
 Each service requires two declarations in your deploy script:

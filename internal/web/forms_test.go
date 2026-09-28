@@ -3,12 +3,15 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"nori/internal/notify"
+	"nori/internal/store"
 )
 
 func TestParseServiceFormReadsCompleteEnvFile(t *testing.T) {
@@ -79,6 +82,86 @@ func TestValidateServiceFormRejectsInvalidHealthURL(t *testing.T) {
 	err := validateServiceForm(context.Background(), form)
 	if err == nil || !strings.Contains(err.Error(), "health URL") {
 		t.Fatalf("expected health URL validation error, got %v", err)
+	}
+}
+
+func TestTemplateServiceFormUsesStructuredConfigWithoutRequiringBash(t *testing.T) {
+	values := url.Values{
+		"name":            {"api"},
+		"watched_image":   {"ghcr.io/acme/api:latest"},
+		"policy":          {"manual"},
+		"deployment_mode": {"single_container"},
+		"template_config": {`{"version":1,"internal_port":8080,"restart_policy":"always","health":{"command":"true","timeout_seconds":5}}`},
+		"env_file":        {"PORT=8080\n"},
+	}
+	req := httptest.NewRequest("POST", "/services", strings.NewReader(values.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if err := req.ParseForm(); err != nil {
+		t.Fatal(err)
+	}
+	form := parseServiceForm(req)
+	if form.DeploymentMode != "single_container" {
+		t.Fatalf("DeploymentMode = %q", form.DeploymentMode)
+	}
+	if err := validateServiceForm(context.Background(), form); err != nil {
+		t.Fatalf("template form validation: %v", err)
+	}
+}
+
+func TestTemplateServiceFormRejectsInvalidConfigBeforeSaving(t *testing.T) {
+	form := ServiceFormData{
+		EnvFile:        "PORT=8080\n",
+		DeploymentMode: "postgres",
+		TemplateConfig: `{"version":1,"internal_port":8080,"restart_policy":"always","health":{"command":"true","timeout_seconds":5},"postgres":{"image":"postgres:latest"}}`,
+	}
+	err := validateServiceForm(context.Background(), form)
+	if err == nil || !strings.Contains(err.Error(), "template configuration") {
+		t.Fatalf("expected template configuration validation error, got %v", err)
+	}
+}
+
+func TestRenderTemplateAsCustomScriptKeepsSecretsOutOfTheGeneratedScript(t *testing.T) {
+	svc := &store.Service{
+		ID: 1, Name: "api", WatchedImage: "ghcr.io/acme/api:latest",
+		DeploymentMode: store.DeploymentModeSingleContainer,
+		TemplateConfig: `{"version":1,"internal_port":8080,"restart_policy":"always","health":{"command":"true","timeout_seconds":5}}`,
+	}
+	script, err := renderTemplateAsCustomScript(svc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(script, "$ENV_FILE") || strings.Contains(script, "s3cret") {
+		t.Fatalf("generated script must use the secret-safe env-file boundary: %q", script)
+	}
+}
+
+func TestDashboardCreatesTemplateServiceWithValidatedStructuredConfiguration(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "dashboard-template.db"), make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	values := url.Values{
+		"name":                   {"api"},
+		"watched_image":          {"ghcr.io/acme/api:latest"},
+		"policy":                 {"manual"},
+		"deployment_mode":        {"single_container"},
+		"template_config_single": {`{"version":1,"internal_port":8080,"restart_policy":"always","health":{"command":"true","timeout_seconds":5}}`},
+		"env_file":               {"PORT=8080\n"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/services", strings.NewReader(values.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	(&Server{store: st}).handleServiceCreate(response, req)
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("create status = %d, body = %q", response.Code, response.Body.String())
+	}
+	svc, err := st.GetServiceByName(context.Background(), "api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if svc.DeploymentMode != store.DeploymentModeSingleContainer || !strings.Contains(svc.TemplateConfig, `"restart_policy":"always"`) {
+		t.Fatalf("dashboard did not persist the validated template contract: %+v", svc)
 	}
 }
 
