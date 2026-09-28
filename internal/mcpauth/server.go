@@ -113,7 +113,7 @@ func (s *Server) bootstrapOAuthGrantManagement(ctx context.Context) error {
 			return err
 		}
 		var client storedClient
-		if json.Unmarshal(clientRecord.Data, &client) != nil || client.Client.Name == "" || client.Epoch != config.Epoch || clientRecord.Used {
+		if json.Unmarshal(clientRecord.Data, &client) != nil || client.Epoch != config.Epoch || clientRecord.Used {
 			return nil
 		}
 		err = s.st.BootstrapOAuthGrant(ctx, store.OAuthGrantBootstrap{
@@ -153,6 +153,9 @@ func (s *Server) bootstrapOAuthGrantManagement(ctx context.Context) error {
 	}
 	families := make(map[string]refreshFamily)
 	for _, refresh := range refreshes {
+		if _, ok := projectedFamilies[refresh.Family]; ok {
+			continue
+		}
 		var g grant
 		if json.Unmarshal(refresh.Data, &g) != nil || g.ClientID == "" || g.Scope == "" || g.Family == "" || g.Family != refresh.Family || g.Epoch != config.Epoch || g.Resource != config.PublicURL+"/mcp" || g.FamilyExpires <= now {
 			continue

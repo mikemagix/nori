@@ -565,6 +565,86 @@ func TestBootstrapOAuthGrantManagementSkipsExistingProjectionWrites(t *testing.T
 	}
 }
 
+func TestBootstrapOAuthGrantManagementSkipsTombstonedFamilyBeforeWrite(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test.db")
+	st, err := store.Open(path, make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.SetMCPConfig(ctx, true, "https://nori.example", false); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := st.GetMCPConfig(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(st, nil)
+	now := time.Now().Truncate(time.Second)
+	cl := storedClient{Client: client{ID: "legacy-client", Name: "Legacy client", Method: "none"}, Epoch: cfg.Epoch}
+	if err := s.put(ctx, cl.Client.ID, "client", "", now.Add(approvedClientLifetime), cl); err != nil {
+		t.Fatal(err)
+	}
+	g := grant{ClientID: cl.Client.ID, Resource: cfg.PublicURL + "/mcp", Scope: ScopeRead, Epoch: cfg.Epoch, Family: "revoked-family", FamilyExpires: now.Add(grantLifetime).Unix()}
+	if err := s.put(ctx, "legacy-code", "code", g.Family, now.Add(authorizationCodeLifetime), g); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RevokeOAuthFamily(ctx, g.Family); err != nil {
+		t.Fatal(err)
+	}
+
+	lockedDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lockedDB.Close()
+	if _, err := lockedDB.Exec("BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	defer lockedDB.Exec("ROLLBACK")
+
+	checkCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	if err := s.bootstrapOAuthGrantManagement(checkCtx); err != nil {
+		t.Fatalf("tombstoned family bootstrap error = %v, want a read-only skip without waiting on writer lock", err)
+	}
+}
+
+func TestListOAuthGrantManagementBootstrapsEmptyClientName(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.SetMCPConfig(ctx, true, "https://nori.example", false); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := st.GetMCPConfig(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(st, nil)
+	now := time.Now().Truncate(time.Second)
+	cl := storedClient{Client: client{ID: "unnamed-client", Method: "none"}, Epoch: cfg.Epoch}
+	if err := s.put(ctx, cl.Client.ID, "client", "", now.Add(approvedClientLifetime), cl); err != nil {
+		t.Fatal(err)
+	}
+	g := grant{ClientID: cl.Client.ID, Resource: cfg.PublicURL + "/mcp", Scope: ScopeRead, Epoch: cfg.Epoch, Family: "unnamed-family", FamilyExpires: now.Add(grantLifetime).Unix()}
+	if err := s.put(ctx, "unnamed-code", "code", g.Family, now.Add(authorizationCodeLifetime), g); err != nil {
+		t.Fatal(err)
+	}
+
+	registrations, err := s.ListOAuthGrantManagement(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(registrations) != 1 || registrations[0].ClientName != "" || len(registrations[0].Grants) != 1 || registrations[0].Grants[0].ClientName != "" {
+		t.Fatalf("empty-name legacy management projection = %+v", registrations)
+	}
+}
+
 func TestListOAuthGrantManagementBootstrapsLiveRefreshGrant(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), make([]byte, 32))

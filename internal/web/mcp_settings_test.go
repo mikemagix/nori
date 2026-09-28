@@ -98,6 +98,17 @@ func TestMCPGrantManagementSettingsConfirmationAndIsolation(t *testing.T) {
 	if unauthenticated.Code != http.StatusSeeOther {
 		t.Fatalf("unauthenticated confirmation = %d", unauthenticated.Code)
 	}
+	unauthenticatedPost := httptest.NewRequest(http.MethodPost, "/settings/mcp/grants/"+first.ManagementID+"/revoke", strings.NewReader(url.Values{"csrf_token": {"plausible"}, "decision": {"revoke"}}.Encode()))
+	unauthenticatedPost.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	unauthenticatedPost.Header.Set("Origin", "https://nori.example")
+	unauthenticatedPostResult := httptest.NewRecorder()
+	srv.ServeHTTP(unauthenticatedPostResult, unauthenticatedPost)
+	if unauthenticatedPostResult.Code != http.StatusSeeOther {
+		t.Fatalf("unauthenticated revocation POST = %d", unauthenticatedPostResult.Code)
+	}
+	if _, err := st.GetOAuthGrantManagement(ctx, first.ManagementID); err != nil {
+		t.Fatalf("unauthenticated revocation POST changed grant: %v", err)
+	}
 
 	settings := settingsRequest(t, srv, cookies, http.MethodGet, "https://nori.example/settings", "", "")
 	if settings.Code != http.StatusOK {

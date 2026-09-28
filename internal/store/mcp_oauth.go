@@ -173,7 +173,7 @@ func (s *Store) ExtendOAuthClient(ctx context.Context, key string, expires time.
 // It returns the opaque management ID needed by the Settings confirmation flow.
 func (s *Store) ApproveOAuthGrant(ctx context.Context, a OAuthGrantApproval) (OAuthGrant, error) {
 	now := time.Now()
-	if a.ClientKey == "" || a.ClientName == "" || a.Family == "" || a.Scopes == "" || a.Code.Key == "" || a.Code.Kind != "code" || a.Code.Family != a.Family || a.Code.Used || !a.ClientExpiresAt.After(now) || !a.FamilyExpiresAt.After(now) || a.Code.Expires <= now.Unix() {
+	if a.ClientKey == "" || a.Family == "" || a.Scopes == "" || a.Code.Key == "" || a.Code.Kind != "code" || a.Code.Family != a.Family || a.Code.Used || !a.ClientExpiresAt.After(now) || !a.FamilyExpiresAt.After(now) || a.Code.Expires <= now.Unix() {
 		return OAuthGrant{}, errors.New("invalid OAuth grant approval")
 	}
 	if a.ApprovedAt.IsZero() {
@@ -270,8 +270,22 @@ func (s *Store) ListOAuthManagedGrantFamilies(ctx context.Context) (map[string]s
 // mcpauth has already verified its immutable original approval metadata.
 func (s *Store) BootstrapOAuthGrant(ctx context.Context, a OAuthGrantBootstrap) error {
 	now := time.Now()
-	if a.ClientKey == "" || a.ClientName == "" || a.Family == "" || a.Scopes == "" || a.ApprovedAt.IsZero() || !a.ClientExpiresAt.After(now) || !a.FamilyExpiresAt.After(now) {
+	if a.ClientKey == "" || a.Family == "" || a.Scopes == "" || a.ApprovedAt.IsZero() || !a.ClientExpiresAt.After(now) || !a.FamilyExpiresAt.After(now) {
 		return errors.New("invalid OAuth grant bootstrap")
+	}
+	var tombstoned int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM mcp_oauth WHERE kind=? AND family=?`, oauthRevokedKind, a.Family).Scan(&tombstoned); err != nil {
+		return err
+	}
+	if tombstoned != 0 {
+		return ErrNotFound
+	}
+	var existing int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM mcp_oauth WHERE kind=? AND family=?`, oauthManagedGrantKind, a.Family).Scan(&existing); err != nil {
+		return err
+	}
+	if existing != 0 {
+		return nil
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -288,18 +302,18 @@ func (s *Store) BootstrapOAuthGrant(ctx context.Context, a OAuthGrantBootstrap) 
 	if liveClient != 1 {
 		return ErrNotFound
 	}
-	var tombstoned int
-	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM mcp_oauth WHERE kind=? AND family=?`, oauthRevokedKind, a.Family).Scan(&tombstoned); err != nil {
+	var txTombstoned int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM mcp_oauth WHERE kind=? AND family=?`, oauthRevokedKind, a.Family).Scan(&txTombstoned); err != nil {
 		return err
 	}
-	if tombstoned != 0 {
+	if txTombstoned != 0 {
 		return ErrNotFound
 	}
-	var existing int
-	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM mcp_oauth WHERE kind=? AND family=?`, oauthManagedGrantKind, a.Family).Scan(&existing); err != nil {
+	var txExisting int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM mcp_oauth WHERE kind=? AND family=?`, oauthManagedGrantKind, a.Family).Scan(&txExisting); err != nil {
 		return err
 	}
-	if existing != 0 {
+	if txExisting != 0 {
 		return tx.Commit()
 	}
 	registrationKey := oauthManagementKey("oauth-managed-registration", a.ClientKey)
@@ -457,7 +471,7 @@ func decodeOAuthManagedRegistration(data []byte) (oauthManagedRegistration, erro
 	if err := json.Unmarshal(data, &projection); err != nil {
 		return projection, err
 	}
-	if projection.ClientName == "" || projection.ApprovedAt <= 0 || projection.ExpiresAt <= 0 {
+	if projection.ApprovedAt <= 0 || projection.ExpiresAt <= 0 {
 		return projection, errors.New("invalid OAuth managed registration")
 	}
 	return projection, nil
@@ -468,7 +482,7 @@ func decodeOAuthManagedGrant(data []byte) (oauthManagedGrant, error) {
 	if err := json.Unmarshal(data, &projection); err != nil {
 		return projection, err
 	}
-	if projection.ManagementID == "" || projection.RegistrationKey == "" || projection.ClientName == "" || projection.Scopes == "" || projection.ApprovedAt <= 0 || projection.GrantExpiresAt <= 0 {
+	if projection.ManagementID == "" || projection.RegistrationKey == "" || projection.Scopes == "" || projection.ApprovedAt <= 0 || projection.GrantExpiresAt <= 0 {
 		return projection, errors.New("invalid OAuth managed grant")
 	}
 	return projection, nil
