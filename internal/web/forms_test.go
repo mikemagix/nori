@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"nori/internal/notify"
+	"nori/internal/store"
 )
 
 func TestParseServiceFormReadsCompleteEnvFile(t *testing.T) {
@@ -79,6 +80,25 @@ func TestValidateServiceFormRejectsInvalidHealthURL(t *testing.T) {
 	err := validateServiceForm(context.Background(), form)
 	if err == nil || !strings.Contains(err.Error(), "health URL") {
 		t.Fatalf("expected health URL validation error, got %v", err)
+	}
+}
+
+func TestValidateOrdinaryServicePreservesFormDiagnostic(t *testing.T) {
+	svc := &store.Service{
+		Name:         "app",
+		WatchedImage: "nginx:latest",
+		Policy:       store.PolicyManual,
+		DeployScript: "echo ok",
+		HealthURL:    "ftp://bad",
+	}
+	env := "PORT=8080\n"
+
+	err := validateOrdinaryService(context.Background(), svc, &env, false, true)
+	if err == nil || !strings.Contains(err.Error(), "health URL") {
+		t.Fatalf("expected the specific health URL diagnostic, got %v", err)
+	}
+	if strings.Contains(err.Error(), "check Bash syntax, dotenv syntax and health URL") {
+		t.Fatalf("ordinary validation should not replace the specific diagnostic: %v", err)
 	}
 }
 

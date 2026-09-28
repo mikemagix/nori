@@ -519,7 +519,7 @@ func validateOrdinaryService(ctx context.Context, svc *store.Service, env *strin
 		form.EnvFile = *env
 	}
 	if err := validateServiceForm(ctx, form); err != nil {
-		return errors.New("invalid service configuration: check Bash syntax, dotenv syntax and health URL")
+		return err
 	}
 	return nil
 }
