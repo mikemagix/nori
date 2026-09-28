@@ -223,8 +223,8 @@ func TestOAuthGrantManagementHidesRetentionExpiredProjection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(registrations) != 1 || len(registrations[0].Grants) != 0 {
-		t.Fatalf("retention-expired projection remained visible: %+v", registrations)
+	if len(registrations) != 0 {
+		t.Fatalf("retention-expired registration remained visible: %+v", registrations)
 	}
 }
 

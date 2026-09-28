@@ -442,7 +442,13 @@ func (s *Store) ListOAuthGrantManagement(ctx context.Context) ([]OAuthRegistrati
 			return left.ApprovedAt.After(right.ApprovedAt)
 		})
 	}
-	return registrations, nil
+	visible := registrations[:0]
+	for _, registration := range registrations {
+		if len(registration.Grants) > 0 {
+			visible = append(visible, registration)
+		}
+	}
+	return visible, nil
 }
 
 func (s *Store) listOAuthManagedRegistrations(ctx context.Context, now int64) ([]OAuthRegistration, map[string]*OAuthRegistration, error) {
