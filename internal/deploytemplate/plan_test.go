@@ -73,7 +73,9 @@ func TestRenderCustomScriptUsesRuntimeReferencesWithoutSecretValues(t *testing.T
 		ServiceID: 7, ServiceName: "api", TargetImage: "example/api@sha256:abc",
 		Config: Config{
 			Mode: ModeSingleContainer, Version: 1, InternalPort: 3000, RestartPolicy: RestartAlways,
-			Health: HealthCheck{Command: "true", TimeoutSeconds: 15},
+			ServingNetwork: "proxy",
+			Proxy:          &ProxyConfig{Network: "proxy", Domain: "api.example.test", Port: 3000},
+			Health:         HealthCheck{Command: "true", TimeoutSeconds: 15},
 		},
 	})
 	if err != nil {
@@ -86,6 +88,16 @@ func TestRenderCustomScriptUsesRuntimeReferencesWithoutSecretValues(t *testing.T
 	for _, want := range []string{"$SERVICE", "$TARGET_IMAGE", "$ENV_FILE", "nori.service=\"$SERVICE\""} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("script missing %q:\n%s", want, script)
+		}
+	}
+	for _, want := range []string{
+		"health_deadline=$((SECONDS+15))",
+		"timeout 1s docker exec 'nori-7-app-candidate'",
+		"docker rm -f \"nori-7-app-rollback\"",
+		"--env VIRTUAL_HOST='api.example.test' --env VIRTUAL_PORT=3000",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("script missing bounded promotion safeguard %q:\n%s", want, script)
 		}
 	}
 	if strings.Contains(script, "top-secret") || strings.Contains(script, "set -x") {
@@ -115,6 +127,14 @@ func TestRenderPostgresCustomScriptMaterializesDatabaseBeforeApp(t *testing.T) {
 	for _, want := range []string{"nori-8-postgres", "POSTGRES_PASSWORD", "nori-8-db-internal", "docker pull \"postgres:16.4\""} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("script missing %q:\n%s", want, script)
+		}
+	}
+	for _, want := range []string{
+		"db_deadline=$((SECONDS+30))",
+		"timeout 1s docker exec 'nori-8-postgres'",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("script missing postgres/proxy safeguard %q:\n%s", want, script)
 		}
 	}
 	if strings.Index(script, "docker pull \"postgres:16.4\"") > strings.Index(script, "nori-8-postgres") {

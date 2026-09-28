@@ -36,6 +36,7 @@ type ManagedContainerSpec struct {
 	Networks      []string
 	Mounts        []ManagedMount
 	RestartPolicy string
+	PublishedPort int
 }
 
 type ManagedContainer struct {

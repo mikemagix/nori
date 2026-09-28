@@ -458,7 +458,7 @@ func applicationSpec(plan deploytemplate.Plan, values map[string]string) docker.
 	spec := docker.ManagedContainerSpec{
 		Name: plan.AppCandidate.Name, Image: plan.AppCandidate.Image, Labels: plan.AppCandidate.Labels,
 		Env: sortedEnvironment(containerEnv), Networks: append([]string(nil), plan.AppCandidate.Networks...),
-		RestartPolicy: string(plan.AppCandidate.RestartPolicy),
+		RestartPolicy: string(plan.AppCandidate.RestartPolicy), PublishedPort: plan.InternalPort,
 	}
 	for _, mount := range plan.AppCandidate.Mounts {
 		spec.Mounts = append(spec.Mounts, docker.ManagedMount{
@@ -563,6 +563,10 @@ func (e *Executor) ensurePostgres(ctx context.Context, svc *store.Service, plan 
 		if err != nil {
 			return fmt.Errorf("inspect PostgreSQL container before readiness check: %w", err)
 		}
+		storedPassword, ok := containerEnvironmentValue(database.Env, plan.Postgres.PasswordEnv)
+		if !ok || storedPassword != runtime.password {
+			return errors.New("PostgreSQL password changed; recreate the managed database container explicitly before deploying")
+		}
 		if database.State != "running" {
 			if _, err := fmt.Fprintf(output, "Starting existing PostgreSQL container %s\n", plan.Database.Name); err != nil {
 				return err
@@ -594,6 +598,16 @@ func (e *Executor) ensurePostgres(ctx context.Context, svc *store.Service, plan 
 		}
 	}
 	return nil
+}
+
+func containerEnvironmentValue(env []string, key string) (string, bool) {
+	prefix := key + "="
+	for _, item := range env {
+		if strings.HasPrefix(item, prefix) {
+			return strings.TrimPrefix(item, prefix), true
+		}
+	}
+	return "", false
 }
 
 func postgresEnvironment(plan deploytemplate.Plan, values map[string]string) (postgresRuntime, error) {

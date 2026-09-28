@@ -248,6 +248,9 @@ func TestMCPTemplateConfigurationUsesSharedValidation(t *testing.T) {
 	if svc.DeployScript != "" {
 		t.Fatalf("template service should not require a Custom script, got %q", svc.DeployScript)
 	}
+	if err := setMCPDeploymentTemplate(svc, string(store.DeploymentModeCustom), config); err == nil {
+		t.Fatal("template configuration must not be accepted for Custom deployment mode")
+	}
 
 	if err := setMCPDeploymentTemplate(svc, string(store.DeploymentModePostgres), &deploytemplate.Config{
 		Version: 1, InternalPort: 8080, RestartPolicy: deploytemplate.RestartAlways,

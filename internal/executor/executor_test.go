@@ -601,6 +601,9 @@ func TestApplicationSpecAddsProxyConfigurationWithoutMutatingServiceEnvironment(
 	if !containsEnv(spec.Env, "VIRTUAL_HOST=api.example.test") || !containsEnv(spec.Env, "VIRTUAL_PORT=8080") {
 		t.Fatalf("proxy settings missing from container environment: %v", spec.Env)
 	}
+	if spec.PublishedPort != 8080 {
+		t.Fatalf("published port = %d, want 8080", spec.PublishedPort)
+	}
 	if _, ok := serviceEnv["VIRTUAL_HOST"]; ok {
 		t.Fatalf("template-only proxy settings mutated the service environment: %+v", serviceEnv)
 	}

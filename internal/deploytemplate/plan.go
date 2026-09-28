@@ -112,6 +112,7 @@ type Plan struct {
 	ServiceID       int64
 	ServiceName     string
 	TargetImage     string
+	InternalPort    int
 	AppCurrent      Resource
 	AppCandidate    Resource
 	AppRollback     Resource
@@ -294,7 +295,7 @@ func BuildPlan(in Input) (Plan, error) {
 	if err := in.Config.Validate(); err != nil {
 		return Plan{}, err
 	}
-	plan := Plan{Mode: in.Config.Mode, ServiceID: in.ServiceID, ServiceName: in.ServiceName, TargetImage: in.TargetImage, Health: in.Config.Health}
+	plan := Plan{Mode: in.Config.Mode, ServiceID: in.ServiceID, ServiceName: in.ServiceName, TargetImage: in.TargetImage, InternalPort: in.Config.InternalPort, Health: in.Config.Health}
 	if in.Config.Proxy != nil {
 		proxy := *in.Config.Proxy
 		plan.Proxy = &proxy
@@ -404,10 +405,14 @@ func (p Plan) RenderCustomScript() (string, error) {
 		passwordKey := p.Database.EnvKeys[len(p.Database.EnvKeys)-1]
 		script.WriteString(fmt.Sprintf("grep -q '^%s=' \"$ENV_FILE\"\n", passwordKey))
 		script.WriteString(fmt.Sprintf("if ! docker container inspect %q >/dev/null 2>&1; then docker run -d --name %q --label nori.service=\"$SERVICE\" --label nori.template=1 --label nori.service-id=%d --label nori.role=db --network %q --mount type=volume,src=%q,dst=/var/lib/postgresql/data --env-file \"$ENV_FILE\" %q; else docker start %q >/dev/null; fi\n", p.Database.Name, p.Database.Name, p.ServiceID, p.InternalNetwork.Name, fmt.Sprintf("nori-%d-volume-postgres-data", p.ServiceID), p.Database.Image, p.Database.Name))
-		script.WriteString("# PostgreSQL uses the existing $ENV_FILE boundary before application promotion.\n")
+		probeCommand := fmt.Sprintf("psql \"$%s\" -v ON_ERROR_STOP=1 -c 'SELECT 1'", p.Postgres.ConnectionURLEnv)
+		script.WriteString(fmt.Sprintf("db_deadline=$((SECONDS+%d))\ndb_ready=0\nwhile [ \"$SECONDS\" -lt \"$db_deadline\" ]; do\n  if timeout 1s docker exec %s sh -ec %s; then db_ready=1; break; fi\n  sleep 1\ndone\nif [ \"$db_ready\" -ne 1 ]; then echo 'PostgreSQL readiness check failed before application promotion' >&2; exit 1; fi\n", p.Postgres.ReadyTimeoutSeconds, shellQuote(p.Database.Name), shellQuote(probeCommand)))
 	}
 	script.WriteString(fmt.Sprintf("docker rm -f %q >/dev/null 2>&1 || true\n", p.AppCandidate.Name))
 	script.WriteString(fmt.Sprintf("docker run -d --name %q --label nori.service=\"$SERVICE\" --label nori.template=1 --label nori.service-id=%d --label nori.role=candidate --restart %q --env-file \"$ENV_FILE\"", p.AppCandidate.Name, p.ServiceID, p.AppCandidate.RestartPolicy))
+	if p.Proxy != nil {
+		script.WriteString(fmt.Sprintf(" --env VIRTUAL_HOST=%s --env VIRTUAL_PORT=%d", shellQuote(p.Proxy.Domain), p.Proxy.Port))
+	}
 	for _, mount := range p.AppCandidate.Mounts {
 		script.WriteString(fmt.Sprintf(" --mount type=volume,src=%q,dst=%q", fmt.Sprintf("nori-%d-volume-%s", p.ServiceID, mount.Name), mount.Target))
 	}
@@ -415,9 +420,22 @@ func (p Plan) RenderCustomScript() (string, error) {
 		script.WriteString(fmt.Sprintf(" --network %q", network))
 	}
 	script.WriteString(" \"$TARGET_IMAGE\"\n")
-	script.WriteString(fmt.Sprintf("# Wait no longer than %d seconds for health before promotion.\n", p.Health.TimeoutSeconds))
+	script.WriteString(fmt.Sprintf("health_deadline=$((SECONDS+%d))\nhealth_ok=0\nwhile [ \"$SECONDS\" -lt \"$health_deadline\" ]; do\n", p.Health.TimeoutSeconds))
+	if p.Health.URL != "" {
+		script.WriteString(fmt.Sprintf("  if curl --fail --silent --show-error --max-time 1 %s >/dev/null; then health_ok=1; break; fi\n", shellQuote(p.Health.URL)))
+	} else {
+		script.WriteString(fmt.Sprintf("  if timeout 1s docker exec %s sh -ec %s; then health_ok=1; break; fi\n", shellQuote(p.AppCandidate.Name), shellQuote(p.Health.Command)))
+	}
+	script.WriteString("  sleep 1\ndone\nif [ \"$health_ok\" -ne 1 ]; then echo 'Application health check failed before promotion' >&2; docker rm -f ")
+	script.WriteString(shellQuote(p.AppCandidate.Name))
+	script.WriteString(" >/dev/null 2>&1 || true; exit 1; fi\n")
 	script.WriteString(fmt.Sprintf("docker rm -f %q >/dev/null 2>&1 || true\n", p.AppRollback.Name))
 	script.WriteString(fmt.Sprintf("if docker container inspect %q >/dev/null 2>&1; then docker rename %q %q; fi\n", p.AppCurrent.Name, p.AppCurrent.Name, p.AppRollback.Name))
 	script.WriteString(fmt.Sprintf("docker rename %q %q\n", p.AppCandidate.Name, p.AppCurrent.Name))
+	script.WriteString(fmt.Sprintf("docker rm -f %q >/dev/null 2>&1 || true\n", p.AppRollback.Name))
 	return script.String(), nil
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }

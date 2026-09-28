@@ -558,6 +558,9 @@ func setMCPDeploymentTemplate(svc *store.Service, rawMode string, config *deploy
 	if mode == "" {
 		mode = string(store.DeploymentModeCustom)
 	}
+	if config != nil && store.DeploymentMode(mode) == store.DeploymentModeCustom {
+		return errors.New("template_config requires deployment_mode single_container or postgres")
+	}
 	rawConfig := svc.TemplateConfig
 	if config != nil {
 		encoded, err := json.Marshal(config)

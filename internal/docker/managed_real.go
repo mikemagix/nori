@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"strconv"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
@@ -13,6 +14,7 @@ import (
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/errdefs"
+	"github.com/docker/go-connections/nat"
 )
 
 func (r *realClient) Pull(ctx context.Context, imageRef string) error {
@@ -62,6 +64,14 @@ func (r *realClient) CreateContainer(ctx context.Context, spec ManagedContainerS
 	host := &container.HostConfig{
 		RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyMode(spec.RestartPolicy)},
 	}
+	containerConfig := &container.Config{
+		Image: spec.Image, Env: append([]string(nil), spec.Env...), Labels: maps.Clone(spec.Labels),
+	}
+	if spec.PublishedPort > 0 {
+		port := nat.Port(fmt.Sprintf("%d/tcp", spec.PublishedPort))
+		containerConfig.ExposedPorts = nat.PortSet{port: struct{}{}}
+		host.PortBindings = nat.PortMap{port: []nat.PortBinding{{HostPort: strconv.Itoa(spec.PublishedPort)}}}
+	}
 	for _, item := range spec.Mounts {
 		host.Mounts = append(host.Mounts, mount.Mount{Type: mount.TypeVolume, Source: item.Source, Target: item.Target})
 	}
@@ -69,9 +79,7 @@ func (r *realClient) CreateContainer(ctx context.Context, spec ManagedContainerS
 	for _, networkName := range spec.Networks {
 		networking.EndpointsConfig[networkName] = &network.EndpointSettings{}
 	}
-	_, err := r.cli.ContainerCreate(ctx, &container.Config{
-		Image: spec.Image, Env: append([]string(nil), spec.Env...), Labels: maps.Clone(spec.Labels),
-	}, host, networking, nil, spec.Name)
+	_, err := r.cli.ContainerCreate(ctx, containerConfig, host, networking, nil, spec.Name)
 	return managedError(err)
 }
 
