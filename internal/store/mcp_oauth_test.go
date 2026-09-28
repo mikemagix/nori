@@ -150,7 +150,24 @@ func TestOAuthGrantManagementFamilyRevocationMarksProjectionAndBlocksNewCredenti
 	}
 }
 
-func TestOAuthGrantManagementPurgesRetentionAfterProjectionExpiry(t *testing.T) {
+func TestBootstrapOAuthGrantReturnsNotFoundWhenExpiryRaces(t *testing.T) {
+	st := testStore(t)
+	now := time.Now()
+	err := st.BootstrapOAuthGrant(context.Background(), OAuthGrantBootstrap{
+		ClientKey:       "client",
+		ClientName:      "Legacy client",
+		ClientExpiresAt: now.Add(-time.Second),
+		ApprovedAt:      now.Add(-time.Minute),
+		Family:          "family",
+		FamilyExpiresAt: now.Add(time.Hour),
+		Scopes:          "nori:read",
+	})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expired client metadata error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestOAuthGrantManagementHidesRetentionExpiredProjection(t *testing.T) {
 	st := testStore(t)
 	ctx := context.Background()
 	now := time.Now().Unix()
@@ -186,13 +203,6 @@ func TestOAuthGrantManagementPurgesRetentionAfterProjectionExpiry(t *testing.T) 
 	}
 	if len(registrations) != 1 || len(registrations[0].Grants) != 0 {
 		t.Fatalf("retention-expired projection remained visible: %+v", registrations)
-	}
-	var count int
-	if err := st.db.QueryRowContext(ctx, `SELECT count(*) FROM mcp_oauth WHERE kind=?`, oauthManagedGrantKind).Scan(&count); err != nil {
-		t.Fatal(err)
-	}
-	if count != 0 {
-		t.Fatalf("expired projection was not purged: %d", count)
 	}
 }
 

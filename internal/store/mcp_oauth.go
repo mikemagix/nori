@@ -173,7 +173,7 @@ func (s *Store) ExtendOAuthClient(ctx context.Context, key string, expires time.
 // It returns the opaque management ID needed by the Settings confirmation flow.
 func (s *Store) ApproveOAuthGrant(ctx context.Context, a OAuthGrantApproval) (OAuthGrant, error) {
 	now := time.Now()
-	if a.ClientKey == "" || a.Family == "" || a.Scopes == "" || a.Code.Key == "" || a.Code.Kind != "code" || a.Code.Family != a.Family || a.Code.Used || !a.ClientExpiresAt.After(now) || !a.FamilyExpiresAt.After(now) || a.Code.Expires <= now.Unix() {
+	if a.ClientKey == "" || a.ClientName == "" || a.Family == "" || a.Scopes == "" || a.Code.Key == "" || a.Code.Kind != "code" || a.Code.Family != a.Family || a.Code.Used || !a.ClientExpiresAt.After(now) || !a.FamilyExpiresAt.After(now) || a.Code.Expires <= now.Unix() {
 		return OAuthGrant{}, errors.New("invalid OAuth grant approval")
 	}
 	if a.ApprovedAt.IsZero() {
@@ -270,8 +270,11 @@ func (s *Store) ListOAuthManagedGrantFamilies(ctx context.Context) (map[string]s
 // mcpauth has already verified its immutable original approval metadata.
 func (s *Store) BootstrapOAuthGrant(ctx context.Context, a OAuthGrantBootstrap) error {
 	now := time.Now()
-	if a.ClientKey == "" || a.Family == "" || a.Scopes == "" || a.ApprovedAt.IsZero() || !a.ClientExpiresAt.After(now) || !a.FamilyExpiresAt.After(now) {
+	if a.ClientKey == "" || a.ClientName == "" || a.Family == "" || a.Scopes == "" || a.ApprovedAt.IsZero() {
 		return errors.New("invalid OAuth grant bootstrap")
+	}
+	if !a.ClientExpiresAt.After(now) || !a.FamilyExpiresAt.After(now) {
+		return ErrNotFound
 	}
 	var tombstoned int
 	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM mcp_oauth WHERE kind=? AND family=?`, oauthRevokedKind, a.Family).Scan(&tombstoned); err != nil {
@@ -381,9 +384,6 @@ func insertOAuthTx(ctx context.Context, tx *sql.Tx, r OAuthRecord) error {
 // credential-bearing OAuth payloads.
 func (s *Store) ListOAuthGrantManagement(ctx context.Context) ([]OAuthRegistration, error) {
 	now := time.Now().Unix()
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM mcp_oauth WHERE expires <= ?`, now); err != nil {
-		return nil, err
-	}
 	registrations, byKey, err := s.listOAuthManagedRegistrations(ctx, now)
 	if err != nil {
 		return nil, err
@@ -471,7 +471,7 @@ func decodeOAuthManagedRegistration(data []byte) (oauthManagedRegistration, erro
 	if err := json.Unmarshal(data, &projection); err != nil {
 		return projection, err
 	}
-	if projection.ApprovedAt <= 0 || projection.ExpiresAt <= 0 {
+	if projection.ClientName == "" || projection.ApprovedAt <= 0 || projection.ExpiresAt <= 0 {
 		return projection, errors.New("invalid OAuth managed registration")
 	}
 	return projection, nil
@@ -482,7 +482,7 @@ func decodeOAuthManagedGrant(data []byte) (oauthManagedGrant, error) {
 	if err := json.Unmarshal(data, &projection); err != nil {
 		return projection, err
 	}
-	if projection.ManagementID == "" || projection.RegistrationKey == "" || projection.Scopes == "" || projection.ApprovedAt <= 0 || projection.GrantExpiresAt <= 0 {
+	if projection.ManagementID == "" || projection.RegistrationKey == "" || projection.ClientName == "" || projection.Scopes == "" || projection.ApprovedAt <= 0 || projection.GrantExpiresAt <= 0 {
 		return projection, errors.New("invalid OAuth managed grant")
 	}
 	return projection, nil

@@ -490,7 +490,7 @@ func TestListOAuthGrantManagementBootstrapsLiveCodeGrant(t *testing.T) {
 	}
 	s := New(st, nil)
 	now := time.Now().Truncate(time.Second)
-	cl := storedClient{Client: client{ID: "legacy-client", Name: "Legacy client", Method: "none"}, Epoch: cfg.Epoch}
+	cl := storedClient{Client: client{ID: "legacy-client", Method: "none"}, Epoch: cfg.Epoch}
 	if err := s.put(ctx, cl.Client.ID, "client", "", now.Add(approvedClientLifetime), cl); err != nil {
 		t.Fatal(err)
 	}
@@ -503,7 +503,7 @@ func TestListOAuthGrantManagementBootstrapsLiveCodeGrant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(registrations) != 1 || registrations[0].ClientName != "Legacy client" || len(registrations[0].Grants) != 1 {
+	if len(registrations) != 1 || registrations[0].ClientName != "Unnamed client" || len(registrations[0].Grants) != 1 {
 		t.Fatalf("legacy management projection = %+v", registrations)
 	}
 	managed := registrations[0].Grants[0]
@@ -640,7 +640,7 @@ func TestListOAuthGrantManagementBootstrapsEmptyClientName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(registrations) != 1 || registrations[0].ClientName != "" || len(registrations[0].Grants) != 1 || registrations[0].Grants[0].ClientName != "" {
+	if len(registrations) != 1 || registrations[0].ClientName != "Unnamed client" || len(registrations[0].Grants) != 1 || registrations[0].Grants[0].ClientName != "Unnamed client" {
 		t.Fatalf("empty-name legacy management projection = %+v", registrations)
 	}
 }
