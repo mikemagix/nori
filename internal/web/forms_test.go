@@ -108,6 +108,18 @@ func TestTemplateServiceFormUsesStructuredConfigWithoutRequiringBash(t *testing.
 	}
 }
 
+func TestValidateServiceFormRejectsInvalidTemplateServiceName(t *testing.T) {
+	form := ServiceFormData{
+		Name:           strings.Repeat("a", 64),
+		EnvFile:        "PORT=8080\n",
+		DeploymentMode: "single_container",
+		TemplateConfig: `{"version":1,"internal_port":8080,"restart_policy":"always","health":{"command":"true","timeout_seconds":5}}`,
+	}
+	if err := validateServiceForm(context.Background(), form); err == nil || !strings.Contains(err.Error(), "template service name") {
+		t.Fatalf("expected template service name validation error, got %v", err)
+	}
+}
+
 func TestTemplateServiceFormRejectsInvalidConfigBeforeSaving(t *testing.T) {
 	form := ServiceFormData{
 		EnvFile:        "PORT=8080\n",

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -21,6 +22,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"nori/internal/auth"
+	"nori/internal/deploytemplate"
 	"nori/internal/docker"
 	"nori/internal/envfile"
 	"nori/internal/executor"
@@ -867,6 +869,9 @@ func validateServiceForm(ctx context.Context, form ServiceFormData) error {
 	mode, _, err := normalizedTemplateConfig(form.DeploymentMode, form.TemplateConfig)
 	if err != nil {
 		return fmt.Errorf("template configuration: %w", err)
+	}
+	if mode != store.DeploymentModeCustom && !deploytemplate.ValidServiceName(form.Name) {
+		return errors.New("template service name must match [A-Za-z0-9][A-Za-z0-9_.-]{0,62}")
 	}
 	if mode == store.DeploymentModeCustom {
 		if err := executor.ValidateScript(ctx, form.DeployScript); err != nil {

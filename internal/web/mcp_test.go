@@ -19,6 +19,20 @@ import (
 	"nori/internal/store"
 )
 
+func TestValidateMCPServiceRejectsInvalidTemplateServiceName(t *testing.T) {
+	svc := &store.Service{
+		Name:           strings.Repeat("a", 64),
+		WatchedImage:   "ghcr.io/acme/api:latest",
+		Policy:         store.PolicyManual,
+		DeploymentMode: store.DeploymentModeSingleContainer,
+		TemplateConfig: `{"version":1,"internal_port":8080,"restart_policy":"always","health":{"command":"true","timeout_seconds":5}}`,
+	}
+	env := ""
+	if err := validateMCPService(context.Background(), svc, &env); err == nil || !strings.Contains(err.Error(), "template service name") {
+		t.Fatalf("expected template service name validation error, got %v", err)
+	}
+}
+
 func TestMCPServiceLifecycleAndScopes(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(filepath.Join(t.TempDir(), "mcp.db"), make([]byte, 32))

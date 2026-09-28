@@ -509,6 +509,9 @@ func validateMCPService(ctx context.Context, svc *store.Service, env *string) er
 		return fmt.Errorf("invalid template configuration: %w", err)
 	}
 	svc.DeploymentMode, svc.TemplateConfig = mode, config
+	if mode != store.DeploymentModeCustom && !deploytemplate.ValidServiceName(svc.Name) {
+		return errors.New("template service name must match [A-Za-z0-9][A-Za-z0-9_.-]{0,62}")
+	}
 	if !mcpServiceName.MatchString(svc.Name) || svc.Name == store.SelfServiceName {
 		return errors.New("invalid or reserved service name")
 	}

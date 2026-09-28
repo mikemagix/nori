@@ -90,6 +90,7 @@ type Executor struct {
 	managed  docker.ManagedClient
 
 	locks    sync.Map // int64 -> *sync.Mutex
+	inFlight sync.Map // int64 -> struct{} for template deployments
 	failures sync.Map // int64 -> failureRecord
 }
 
@@ -147,6 +148,18 @@ func (e *Executor) Deploy(ctx context.Context, serviceID int64, trigger string) 
 	if isTemplate && svc.IsSelf {
 		return 0, errors.New("the launcher-managed self-service cannot use a deployment template")
 	}
+	templateClaimed := false
+	if isTemplate {
+		if _, loaded := e.inFlight.LoadOrStore(serviceID, struct{}{}); loaded {
+			return 0, errors.New("a deployment is already running for this service")
+		}
+		templateClaimed = true
+		defer func() {
+			if templateClaimed {
+				e.inFlight.Delete(serviceID)
+			}
+		}()
+	}
 	if !isTemplate {
 		if err := ValidateScript(ctx, svc.DeployScript); err != nil {
 			return 0, err
@@ -195,7 +208,13 @@ func (e *Executor) Deploy(ctx context.Context, serviceID int64, trigger string) 
 	}
 
 	log.Printf("deploy: %s %q started (id=%d digest=%s)", trigger, svc.Name, deploy.ID, shortDigest(digest))
-	go e.runDeploy(svc, deploy, env, envFile, plan)
+	go func() {
+		if isTemplate {
+			defer e.inFlight.Delete(serviceID)
+		}
+		e.runDeploy(svc, deploy, env, envFile, plan)
+	}()
+	templateClaimed = false
 	return deploy.ID, nil
 }
 
@@ -311,7 +330,7 @@ func (e *Executor) runTemplateDeploy(ctx context.Context, svc *store.Service, pl
 	if _, err := fmt.Fprintf(output, "Creating candidate %s\n", plan.AppCandidate.Name); err != nil {
 		return err
 	}
-	if err := dk.CreateContainer(ctx, applicationSpec(plan, values)); err != nil {
+	if err := dk.CreateContainer(ctx, applicationSpec(plan, values, !preflight.current)); err != nil {
 		return fmt.Errorf("create application candidate: %w", err)
 	}
 	if err := dk.StartContainer(ctx, plan.AppCandidate.Name); err != nil {
@@ -446,7 +465,7 @@ func asManagedResource(resource deploytemplate.Resource) docker.ManagedResource 
 	return docker.ManagedResource{Name: resource.Name, Labels: resource.Labels}
 }
 
-func applicationSpec(plan deploytemplate.Plan, values map[string]string) docker.ManagedContainerSpec {
+func applicationSpec(plan deploytemplate.Plan, values map[string]string, publishPort bool) docker.ManagedContainerSpec {
 	containerEnv := make(map[string]string, len(values)+2)
 	for key, value := range values {
 		containerEnv[key] = value
@@ -458,7 +477,10 @@ func applicationSpec(plan deploytemplate.Plan, values map[string]string) docker.
 	spec := docker.ManagedContainerSpec{
 		Name: plan.AppCandidate.Name, Image: plan.AppCandidate.Image, Labels: plan.AppCandidate.Labels,
 		Env: sortedEnvironment(containerEnv), Networks: append([]string(nil), plan.AppCandidate.Networks...),
-		RestartPolicy: string(plan.AppCandidate.RestartPolicy), PublishedPort: plan.InternalPort,
+		RestartPolicy: string(plan.AppCandidate.RestartPolicy),
+	}
+	if publishPort {
+		spec.PublishedPort = plan.InternalPort
 	}
 	for _, mount := range plan.AppCandidate.Mounts {
 		spec.Mounts = append(spec.Mounts, docker.ManagedMount{
@@ -472,7 +494,20 @@ func (e *Executor) waitForApplicationHealth(ctx context.Context, plan deploytemp
 	deadline, cancel := context.WithTimeout(ctx, time.Duration(plan.Health.TimeoutSeconds)*time.Second)
 	defer cancel()
 	if plan.Health.Command != "" {
-		return e.managed.RunProbe(deadline, docker.ManagedProbe{Container: plan.AppCandidate.Name, Command: plan.Health.Command})
+		var lastErr error
+		for {
+			attempt, cancelAttempt := context.WithTimeout(deadline, 5*time.Second)
+			lastErr = e.managed.RunProbe(attempt, docker.ManagedProbe{Container: plan.AppCandidate.Name, Command: plan.Health.Command})
+			cancelAttempt()
+			if lastErr == nil {
+				return nil
+			}
+			select {
+			case <-deadline.Done():
+				return fmt.Errorf("timed out waiting for health: %w", lastErr)
+			case <-time.After(250 * time.Millisecond):
+			}
+		}
 	}
 	return waitForHTTPHealth(deadline, plan.Health.URL)
 }
@@ -543,7 +578,8 @@ func (e *Executor) ensurePostgres(ctx context.Context, svc *store.Service, plan 
 		databaseVolume := fmt.Sprintf("nori-%d-volume-postgres-data", plan.ServiceID)
 		spec := docker.ManagedContainerSpec{
 			Name: plan.Database.Name, Image: plan.Database.Image, Labels: plan.Database.Labels,
-			Networks: append([]string(nil), plan.Database.Networks...),
+			RestartPolicy: string(deploytemplate.RestartUnlessStopped),
+			Networks:      append([]string(nil), plan.Database.Networks...),
 			Env: []string{
 				"POSTGRES_DB=" + plan.Postgres.Database,
 				"POSTGRES_USER=" + plan.Postgres.User,

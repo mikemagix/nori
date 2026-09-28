@@ -278,6 +278,10 @@ func explicitPostgresImage(image string) bool {
 
 func validResourceName(name string) bool { return resourceNamePattern.MatchString(name) }
 
+// ValidServiceName reports whether a structured template can safely use the
+// service name as its owned Docker resource identity.
+func ValidServiceName(name string) bool { return validResourceName(name) }
+
 func validMountTarget(target string) bool {
 	return strings.HasPrefix(target, "/") && target != "/" && path.Clean(target) == target && !strings.Contains(target, "..")
 }
