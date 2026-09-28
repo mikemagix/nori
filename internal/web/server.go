@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -436,10 +437,6 @@ func (s *Server) handleServiceCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	form := parseServiceForm(r)
-	if err := validateServiceForm(r.Context(), form); err != nil {
-		_ = ServiceFormPage(form, s.csrf(r), false, "/services", err.Error()).Render(r.Context(), w)
-		return
-	}
 	svc := &store.Service{
 		Name:         form.Name,
 		WatchedImage: form.WatchedImage,
@@ -448,8 +445,17 @@ func (s *Server) handleServiceCreate(w http.ResponseWriter, r *http.Request) {
 		DeployScript: form.DeployScript,
 		HealthURL:    form.HealthURL,
 	}
-	if err := s.store.SaveServiceConfig(r.Context(), svc, &form.EnvFile, nil); err != nil {
-		_ = ServiceFormPage(form, s.csrf(r), false, "/services", err.Error()).Render(r.Context(), w)
+	if _, err := s.saveOrdinaryService(r.Context(), ordinaryWrite{Service: svc, Environment: &form.EnvFile, EnvironmentMode: dashboardEnvironment}); err != nil {
+		var validationErr *ordinaryValidationError
+		if errors.As(err, &validationErr) {
+			_ = ServiceFormPage(form, s.csrf(r), false, "/services", validationErr.Error()).Render(r.Context(), w)
+			return
+		}
+		if _, lookupErr := s.store.GetServiceByName(r.Context(), svc.Name); lookupErr == nil {
+			_ = ServiceFormPage(form, s.csrf(r), false, "/services", "A service with that name already exists.").Render(r.Context(), w)
+			return
+		}
+		_ = ServiceFormPage(form, s.csrf(r), false, "/services", "No changes were saved. Try again.").Render(r.Context(), w)
 		return
 	}
 	log.Printf("service: created %q (image=%s policy=%s)", svc.Name, svc.WatchedImage, svc.Policy)
@@ -491,10 +497,6 @@ func (s *Server) handleServiceUpdate(w http.ResponseWriter, r *http.Request) {
 		form.DeployScript = store.SelfDeployScript
 		form.IsSelf = true
 	}
-	if err := validateServiceForm(r.Context(), form); err != nil {
-		_ = ServiceFormPage(form, s.csrf(r), true, "/services/"+svc.Name, err.Error()).Render(r.Context(), w)
-		return
-	}
 	previous := *svc
 	svc.WatchedImage = form.WatchedImage
 	svc.Policy = store.Policy(form.Policy)
@@ -502,11 +504,49 @@ func (s *Server) handleServiceUpdate(w http.ResponseWriter, r *http.Request) {
 	svc.DeployScript = form.DeployScript
 	svc.HealthURL = form.HealthURL
 	if svc.IsSelf {
+		if err := validateServiceForm(r.Context(), form); err != nil {
+			_ = ServiceFormPage(form, s.csrf(r), true, "/services/"+svc.Name, err.Error()).Render(r.Context(), w)
+			return
+		}
 		err = s.saveSelfConfig(r.Context(), svc, &previous, form.EnvFile)
 	} else {
-		err = s.store.SaveServiceConfig(r.Context(), svc, &form.EnvFile, &previous)
+		expected := &store.Service{ID: svc.ID, Name: svc.Name, ConfigVersion: form.ConfigVersion}
+		_, err = s.saveOrdinaryService(r.Context(), ordinaryWrite{Service: svc, Previous: expected, Environment: &form.EnvFile, EnvironmentMode: dashboardEnvironment})
 	}
 	if err != nil {
+		if errors.Is(err, store.ErrServiceConflict) && !svc.IsSelf {
+			current, currentErr := s.store.GetService(r.Context(), svc.ID)
+			if currentErr == nil {
+				conflictForm := serviceForm(current)
+				conflictForm.EnvFile, currentErr = s.store.GetEnvFile(r.Context(), current.ID)
+				if currentErr != nil {
+					http.Error(w, "could not reload service configuration", http.StatusInternalServerError)
+					return
+				}
+				conflictForm.ReloadURL = "/services/" + current.Name + "/edit"
+				w.WriteHeader(http.StatusConflict)
+				_ = ServiceFormPage(conflictForm, s.csrf(r), true, "/services/"+current.Name, "The configuration changed. Reload it before trying again.").Render(r.Context(), w)
+				return
+			}
+		}
+		var validationErr *ordinaryValidationError
+		if !svc.IsSelf && errors.As(err, &validationErr) {
+			_ = ServiceFormPage(form, s.csrf(r), true, "/services/"+svc.Name, validationErr.Error()).Render(r.Context(), w)
+			return
+		}
+		if !svc.IsSelf {
+			retryForm := serviceForm(svc)
+			// Preserve the precondition the client actually submitted; upgrading it
+			// to the freshly read version could let a retry commit stale fields.
+			retryForm.ConfigVersion = form.ConfigVersion
+			retryForm.EnvFile, err = s.store.GetEnvFile(r.Context(), svc.ID)
+			if err != nil {
+				http.Error(w, "could not reload service configuration", http.StatusInternalServerError)
+				return
+			}
+			_ = ServiceFormPage(retryForm, s.csrf(r), true, "/services/"+svc.Name, "No changes were saved. Try again.").Render(r.Context(), w)
+			return
+		}
 		_ = ServiceFormPage(form, s.csrf(r), true, "/services/"+svc.Name, err.Error()).Render(r.Context(), w)
 		return
 	}
@@ -767,7 +807,7 @@ func (s *Server) serviceToEditForm(ctx context.Context, svc *store.Service) (Ser
 func serviceForm(svc *store.Service) ServiceFormData {
 	return ServiceFormData{
 		Name: svc.Name, WatchedImage: svc.WatchedImage, Policy: string(svc.Policy),
-		CronExpr: svc.CronExpr, DeployScript: svc.DeployScript, HealthURL: svc.HealthURL, IsSelf: svc.IsSelf,
+		CronExpr: svc.CronExpr, DeployScript: svc.DeployScript, HealthURL: svc.HealthURL, ConfigVersion: svc.ConfigVersion, IsSelf: svc.IsSelf,
 	}
 }
 
@@ -775,11 +815,13 @@ func parseServiceForm(r *http.Request) ServiceFormData {
 	// Browsers submit <textarea> content with CRLF newlines; normalize to
 	// LF so the stored script/env matches what was validated and what Bash
 	// can parse.
+	configVersion, _ := strconv.ParseInt(r.FormValue("expected_config_version"), 10, 64)
 	return ServiceFormData{
 		Name: r.FormValue("name"), WatchedImage: r.FormValue("watched_image"),
 		Policy: r.FormValue("policy"), CronExpr: r.FormValue("cron_expr"), HealthURL: r.FormValue("health_url"),
-		DeployScript: executor.NormalizeNewlines(r.FormValue("deploy_script")),
-		EnvFile:      executor.NormalizeNewlines(r.FormValue("env_file")),
+		DeployScript:  executor.NormalizeNewlines(r.FormValue("deploy_script")),
+		EnvFile:       executor.NormalizeNewlines(r.FormValue("env_file")),
+		ConfigVersion: configVersion,
 	}
 }
 

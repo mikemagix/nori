@@ -59,7 +59,7 @@ func (s *Store) saveServiceConfig(ctx context.Context, svc *Service, env *string
 		if previous == nil {
 			return errors.New("previous service configuration is required for updates")
 		}
-		res, err := tx.ExecContext(ctx, `UPDATE service SET watched_image=?,policy=?,cron_expr=?,deploy_script=?,health_url=?,updated_at=? WHERE id=? AND name=? AND is_self=0 AND watched_image=? AND policy=? AND cron_expr=? AND deploy_script=? AND health_url=?`, svc.WatchedImage, svc.Policy, svc.CronExpr, svc.DeployScript, svc.HealthURL, now.Unix(), id, svc.Name, previous.WatchedImage, previous.Policy, previous.CronExpr, previous.DeployScript, previous.HealthURL)
+		res, err := tx.ExecContext(ctx, `UPDATE service SET watched_image=?,policy=?,cron_expr=?,deploy_script=?,health_url=?,updated_at=?,config_version=config_version+1 WHERE id=? AND name=? AND is_self=0 AND config_version=?`, svc.WatchedImage, svc.Policy, svc.CronExpr, svc.DeployScript, svc.HealthURL, now.Unix(), id, svc.Name, previous.ConfigVersion)
 		if err != nil {
 			return err
 		}
@@ -83,5 +83,10 @@ func (s *Store) saveServiceConfig(ctx context.Context, svc *Service, env *string
 		svc.CreatedAt = now
 	}
 	svc.ID, svc.UpdatedAt = id, now
+	if previous == nil {
+		svc.ConfigVersion = 1
+	} else {
+		svc.ConfigVersion = previous.ConfigVersion + 1
+	}
 	return nil
 }

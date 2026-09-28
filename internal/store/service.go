@@ -31,19 +31,20 @@ func (s *Store) CreateService(ctx context.Context, svc *Service) error {
 		return err
 	}
 	svc.ID, err = res.LastInsertId()
+	svc.ConfigVersion = 1
 	return err
 }
 
 func (s *Store) GetService(ctx context.Context, id int64) (*Service, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id,name,watched_image,policy,cron_expr,deploy_script,health_url,is_self,created_at,updated_at
+		`SELECT id,name,watched_image,policy,cron_expr,deploy_script,health_url,is_self,config_version,created_at,updated_at
 		 FROM service WHERE id=?`, id)
 	return scanService(row)
 }
 
 func (s *Store) GetServiceByName(ctx context.Context, name string) (*Service, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id,name,watched_image,policy,cron_expr,deploy_script,health_url,is_self,created_at,updated_at
+		`SELECT id,name,watched_image,policy,cron_expr,deploy_script,health_url,is_self,config_version,created_at,updated_at
 		 FROM service WHERE name=?`, name)
 	return scanService(row)
 }
@@ -65,7 +66,7 @@ func (s *Store) DeleteService(ctx context.Context, id int64) error {
 
 func (s *Store) ListServices(ctx context.Context) ([]*Service, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,name,watched_image,policy,cron_expr,deploy_script,health_url,is_self,created_at,updated_at
+		`SELECT id,name,watched_image,policy,cron_expr,deploy_script,health_url,is_self,config_version,created_at,updated_at
 		 FROM service ORDER BY name`)
 	if err != nil {
 		return nil, err
@@ -91,7 +92,7 @@ func scanService(sc rowScanner) (*Service, error) {
 	var isSelf int
 	var healthURL string
 	err := sc.Scan(&svc.ID, &svc.Name, &svc.WatchedImage, &policy,
-		&svc.CronExpr, &svc.DeployScript, &healthURL, &isSelf, &created, &updated)
+		&svc.CronExpr, &svc.DeployScript, &healthURL, &isSelf, &svc.ConfigVersion, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -110,7 +111,7 @@ func scanService(sc rowScanner) (*Service, error) {
 // has one.
 func (s *Store) GetSelfService(ctx context.Context) (*Service, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id,name,watched_image,policy,cron_expr,deploy_script,health_url,is_self,created_at,updated_at
+		`SELECT id,name,watched_image,policy,cron_expr,deploy_script,health_url,is_self,config_version,created_at,updated_at
 		 FROM service WHERE is_self=1`)
 	return scanService(row)
 }

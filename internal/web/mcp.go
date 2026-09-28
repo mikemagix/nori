@@ -37,13 +37,14 @@ type mcpCreate struct {
 	EnvFile      *string `json:"env_file,omitempty" jsonschema:"Dotenv template: every value must be [REDACTED]; insert values with set_service_secret"`
 }
 type mcpUpdate struct {
-	ServiceID    int64   `json:"service_id"`
-	WatchedImage *string `json:"watched_image,omitempty"`
-	DeployScript *string `json:"deploy_script,omitempty"`
-	Policy       *string `json:"policy,omitempty"`
-	CronExpr     *string `json:"cron_expr,omitempty"`
-	HealthURL    *string `json:"health_url,omitempty"`
-	EnvFile      *string `json:"env_file,omitempty" jsonschema:"Dotenv template: every value must be [REDACTED]; omitted keys are removed; insert values with set_service_secret"`
+	ServiceID             int64   `json:"service_id"`
+	ExpectedConfigVersion int64   `json:"expected_config_version" jsonschema:"Configuration generation returned by get_service; required for updates"`
+	WatchedImage          *string `json:"watched_image,omitempty"`
+	DeployScript          *string `json:"deploy_script,omitempty"`
+	Policy                *string `json:"policy,omitempty"`
+	CronExpr              *string `json:"cron_expr,omitempty"`
+	HealthURL             *string `json:"health_url,omitempty"`
+	EnvFile               *string `json:"env_file,omitempty" jsonschema:"Dotenv template: every value must be [REDACTED]; omitted keys are removed; insert values with set_service_secret"`
 }
 type mcpHistory struct {
 	ServiceID int64 `json:"service_id"`
@@ -60,14 +61,16 @@ type mcpLogs struct {
 	Tail          int    `json:"tail,omitempty" jsonschema:"Lines, defaults to 100, maximum 1000"`
 }
 type mcpSecret struct {
-	ServiceID int64  `json:"service_id"`
-	Key       string `json:"key" jsonschema:"Environment variable name already declared in the service configuration"`
-	Value     string `json:"value" jsonschema:"Literal secret value; never returned"`
+	ServiceID             int64  `json:"service_id"`
+	ExpectedConfigVersion int64  `json:"expected_config_version" jsonschema:"Configuration generation returned by get_service; required for updates"`
+	Key                   string `json:"key" jsonschema:"Environment variable name already declared in the service configuration"`
+	Value                 string `json:"value" jsonschema:"Literal secret value; never returned"`
 }
 
 type mcpEnv struct {
-	ServiceID int64  `json:"service_id"`
-	EnvFile   string `json:"env_file" jsonschema:"Replacement dotenv template: every value must be [REDACTED]; existing values are preserved by name"`
+	ServiceID             int64  `json:"service_id"`
+	ExpectedConfigVersion int64  `json:"expected_config_version" jsonschema:"Configuration generation returned by get_service; required for updates"`
+	EnvFile               string `json:"env_file" jsonschema:"Replacement dotenv template: every value must be [REDACTED]; existing values are preserved by name"`
 }
 
 // addNoriTool puts authorization before all tool side effects. The OAuth HTTP
@@ -143,20 +146,24 @@ func (s *Server) newMCPHandler() http.Handler {
 			in.Policy = string(store.PolicyManual)
 		}
 		svc := &store.Service{Name: in.Name, WatchedImage: in.WatchedImage, DeployScript: in.DeployScript, Policy: store.Policy(in.Policy), CronExpr: in.CronExpr, HealthURL: in.HealthURL}
-		if err := validateMCPService(ctx, svc, in.EnvFile); err != nil {
-			return nil, err
-		}
-		if err := s.store.SaveServiceConfigTemplate(ctx, svc, in.EnvFile, nil); err != nil {
+		if _, err := s.saveOrdinaryService(ctx, ordinaryWrite{Service: svc, Environment: in.EnvFile, EnvironmentMode: templateEnvironment}); err != nil {
+			var validationErr *ordinaryValidationError
+			if errors.As(err, &validationErr) {
+				return nil, errors.New("invalid service configuration; check the name, image, policy, schedule, script, health URL, and environment format")
+			}
 			return nil, errors.New("could not create service; check that its name is unique")
 		}
 		return svc, nil
 	})
 	addNoriTool(s, server, "update_service", "Update supplied configuration fields; omitted fields are preserved and names are immutable. Scripts execute on the server with Docker access.", mcpauth.ScopeWrite, func(ctx context.Context, in mcpUpdate) (any, error) {
+		if in.ExpectedConfigVersion <= 0 {
+			return nil, errors.New("expected_config_version is required")
+		}
 		svc, err := s.mcpService(ctx, in.ServiceID, true)
 		if err != nil {
 			return nil, err
 		}
-		previous := *svc
+		expected := &store.Service{ID: svc.ID, Name: svc.Name, ConfigVersion: in.ExpectedConfigVersion}
 		if in.WatchedImage != nil {
 			svc.WatchedImage = *in.WatchedImage
 		}
@@ -172,12 +179,13 @@ func (s *Server) newMCPHandler() http.Handler {
 		if in.HealthURL != nil {
 			svc.HealthURL = *in.HealthURL
 		}
-		if err := validateMCPService(ctx, svc, in.EnvFile); err != nil {
-			return nil, err
-		}
-		if err := s.store.SaveServiceConfigTemplate(ctx, svc, in.EnvFile, &previous); err != nil {
+		if _, err := s.saveOrdinaryService(ctx, ordinaryWrite{Service: svc, Previous: expected, Environment: in.EnvFile, EnvironmentMode: templateEnvironment}); err != nil {
 			if errors.Is(err, store.ErrServiceConflict) {
-				return nil, err
+				return nil, errors.New("configuration changed; read it again and retry")
+			}
+			var validationErr *ordinaryValidationError
+			if errors.As(err, &validationErr) {
+				return nil, errors.New("invalid service configuration; check the image, policy, schedule, script, health URL, and environment format")
 			}
 			return nil, errors.New("could not update service")
 		}
@@ -337,6 +345,9 @@ func (s *Server) newMCPHandler() http.Handler {
 		return map[string]any{"env_file": template}, nil
 	})
 	addNoriTool(s, server, "set_service_environment", "Replace the dotenv structure using [REDACTED] for every value. Preserves existing values by name; new keys start empty; omitted keys are removed. Use set_service_secret to insert values.", mcpauth.ScopeWrite, func(ctx context.Context, in mcpEnv) (any, error) {
+		if in.ExpectedConfigVersion <= 0 {
+			return nil, errors.New("expected_config_version is required")
+		}
 		svc, err := s.mcpService(ctx, in.ServiceID, true)
 		if err != nil {
 			return nil, err
@@ -348,13 +359,20 @@ func (s *Server) newMCPHandler() http.Handler {
 		if _, err := envfile.ResolveTemplate("", in.EnvFile); err != nil {
 			return nil, err
 		}
-		if err := s.store.SetEnvTemplate(ctx, svc.ID, in.EnvFile); err != nil {
+		version, err := s.store.SetEnvTemplateAtVersion(ctx, svc.ID, in.ExpectedConfigVersion, in.EnvFile)
+		if err != nil {
+			if errors.Is(err, store.ErrServiceConflict) {
+				return nil, errors.New("configuration changed; read it again and retry")
+			}
 			return nil, errors.New("could not save environment")
 		}
-		return map[string]any{"success": true}, nil
+		return map[string]any{"service_id": svc.ID, "config_version": version, "success": true}, nil
 	})
 
 	addNoriTool(s, server, "set_service_secret", "Set a literal value for an environment variable already declared in the service configuration. Write-only: never reads or returns values. Requires nori:write and nori:secrets.", mcpauth.ScopeWrite, func(ctx context.Context, in mcpSecret) (any, error) {
+		if in.ExpectedConfigVersion <= 0 {
+			return nil, errors.New("expected_config_version is required")
+		}
 		if err := mcpauth.RequireScope(ctx, mcpauth.ScopeSecrets); err != nil {
 			return nil, err
 		}
@@ -365,10 +383,14 @@ func (s *Server) newMCPHandler() http.Handler {
 		if len(in.Value) > envfile.MaxSize {
 			return nil, errors.New("environment value must be at most 128 KiB")
 		}
-		if err := s.store.SetEnvSecret(ctx, svc.ID, in.Key, in.Value); err != nil {
+		version, err := s.store.SetEnvSecretAtVersion(ctx, svc.ID, in.ExpectedConfigVersion, in.Key, in.Value)
+		if err != nil {
+			if errors.Is(err, store.ErrServiceConflict) {
+				return nil, errors.New("configuration changed; read it again and retry")
+			}
 			return nil, errors.New("could not set secret; check the variable exists, its value is valid dotenv, and the environment is at most 128 KiB")
 		}
-		return map[string]any{"success": true}, nil
+		return map[string]any{"service_id": svc.ID, "config_version": version, "success": true}, nil
 	})
 	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true, MaxRequestBodyBytes: 1 << 20})
 }
@@ -457,7 +479,11 @@ func (s *Server) mcpService(ctx context.Context, id int64, mutation bool) (*stor
 var mcpServiceName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$`)
 
 func validateMCPService(ctx context.Context, svc *store.Service, env *string) error {
-	if !mcpServiceName.MatchString(svc.Name) || svc.Name == store.SelfServiceName {
+	return validateOrdinaryService(ctx, svc, env, true, true)
+}
+
+func validateOrdinaryService(ctx context.Context, svc *store.Service, env *string, template, validateName bool) error {
+	if validateName && (!mcpServiceName.MatchString(svc.Name) || svc.Name == store.SelfServiceName) {
 		return errors.New("invalid or reserved service name")
 	}
 	if strings.TrimSpace(svc.WatchedImage) == "" || len(svc.WatchedImage) > 512 {
@@ -485,13 +511,15 @@ func validateMCPService(ctx context.Context, svc *store.Service, env *string) er
 			return errors.New("environment must be at most 128 KiB")
 		}
 		*env = executor.NormalizeNewlines(*env)
-		if _, err := envfile.ResolveTemplate("", *env); err != nil {
-			return err
+		if template {
+			if _, err := envfile.ResolveTemplate("", *env); err != nil {
+				return err
+			}
 		}
 		form.EnvFile = *env
 	}
 	if err := validateServiceForm(ctx, form); err != nil {
-		return errors.New("invalid service configuration: check Bash syntax, dotenv syntax and health URL")
+		return err
 	}
 	return nil
 }

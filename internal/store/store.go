@@ -20,7 +20,7 @@ func dsn(path string) string {
 	u := url.URL{
 		Scheme:   "file",
 		Opaque:   (&url.URL{Path: path}).EscapedPath(),
-		RawQuery: url.Values{"_pragma": {"busy_timeout(5000)", "foreign_keys(1)"}}.Encode(),
+		RawQuery: url.Values{"_pragma": {"busy_timeout(5000)", "foreign_keys(1)"}, "_txlock": {"immediate"}}.Encode(),
 	}
 	return u.String()
 }
@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS service (
 	deploy_script TEXT NOT NULL DEFAULT '',
 	health_url TEXT NOT NULL DEFAULT '',
 	is_self INTEGER NOT NULL DEFAULT 0,
+	config_version INTEGER NOT NULL DEFAULT 1,
 	created_at INTEGER NOT NULL,
 	updated_at INTEGER NOT NULL
 );
@@ -106,6 +107,7 @@ func migrate(db *sql.DB) error {
 	defer rows.Close()
 	hasSelf := false
 	hasHealth := false
+	hasConfigVersion := false
 	for rows.Next() {
 		var cid int
 		var name, typ string
@@ -120,6 +122,9 @@ func migrate(db *sql.DB) error {
 		if name == "health_url" {
 			hasHealth = true
 		}
+		if name == "config_version" {
+			hasConfigVersion = true
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return err
@@ -131,6 +136,11 @@ func migrate(db *sql.DB) error {
 	}
 	if !hasHealth {
 		if _, err := db.Exec(`ALTER TABLE service ADD COLUMN health_url TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	if !hasConfigVersion {
+		if _, err := db.Exec(`ALTER TABLE service ADD COLUMN config_version INTEGER NOT NULL DEFAULT 1`); err != nil {
 			return err
 		}
 	}

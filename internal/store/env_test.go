@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -137,6 +138,10 @@ func TestEnvTemplateAndSecretUpdates(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A template read before rotation must preserve the current value on save.
+	svc, err := st.GetService(ctx, svc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	previous := *svc
 	if err := st.SaveServiceConfigTemplate(ctx, svc, ptrEnv("TOKEN='[REDACTED]'\nNEW='[REDACTED]'"), &previous); err != nil {
 		t.Fatal(err)
@@ -170,6 +175,63 @@ func TestEnvTemplateAndSecretUpdates(t *testing.T) {
 	}
 	if err := st.SetEnvSecret(ctx, svc.ID, "TOKEN", "removed"); err == nil {
 		t.Fatal("removed key reintroduced")
+	}
+}
+
+func TestEnvironmentWritesAdvanceServiceVersion(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+	svc := &Service{Name: "app", WatchedImage: "nginx", Policy: PolicyManual}
+	if err := st.CreateService(ctx, svc); err != nil {
+		t.Fatal(err)
+	}
+	if svc.ConfigVersion != 1 {
+		t.Fatalf("created config version = %d, want 1", svc.ConfigVersion)
+	}
+	if err := st.SetEnvFile(ctx, svc.ID, "TOKEN=first\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetEnvTemplate(ctx, svc.ID, "TOKEN='[REDACTED]'\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetEnvSecret(ctx, svc.ID, "TOKEN", "second"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.GetService(ctx, svc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ConfigVersion != 4 {
+		t.Fatalf("config version after environment writes = %d, want 4", got.ConfigVersion)
+	}
+}
+
+func TestVersionedSecretWriteRejectsStaleGeneration(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+	svc := &Service{Name: "app", WatchedImage: "nginx", Policy: PolicyManual}
+	if err := st.CreateService(ctx, svc); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetEnvFile(ctx, svc.ID, "TOKEN=first\n"); err != nil {
+		t.Fatal(err)
+	}
+	current, err := st.GetService(ctx, svc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SetEnvSecretAtVersion(ctx, svc.ID, current.ConfigVersion, "TOKEN", "second"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SetEnvSecretAtVersion(ctx, svc.ID, current.ConfigVersion, "TOKEN", "stale"); !errors.Is(err, ErrServiceConflict) {
+		t.Fatalf("stale secret write = %v, want ErrServiceConflict", err)
+	}
+	got, err := st.GetEnvFile(ctx, svc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "TOKEN=\"second\"\n" {
+		t.Fatalf("environment after stale secret write = %q, want current value", got)
 	}
 }
 
