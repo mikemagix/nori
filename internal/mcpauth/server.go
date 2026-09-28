@@ -161,6 +161,9 @@ func (s *Server) bootstrapOAuthGrantManagement(ctx context.Context) error {
 		if _, ok := projectedFamilies[refresh.Family]; ok {
 			continue
 		}
+		if _, ok := handled[refresh.Family]; ok {
+			continue
+		}
 		var g grant
 		if json.Unmarshal(refresh.Data, &g) != nil || g.ClientID == "" || g.Scope == "" || g.Family == "" || g.Family != refresh.Family || g.Epoch != config.Epoch || g.Resource != config.PublicURL+"/mcp" || g.FamilyExpires <= now {
 			continue
