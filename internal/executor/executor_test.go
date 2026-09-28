@@ -533,6 +533,49 @@ func TestDeploy_TemplateRedeployPublishesPortAfterStoppingCurrent(t *testing.T) 
 	}
 }
 
+func TestDeploy_TemplateRedeployWithServingNetworkKeepsCurrentPort(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	svc := &store.Service{
+		Name:           "api",
+		WatchedImage:   "ghcr.io/acme/api:latest",
+		Policy:         store.PolicyManual,
+		DeploymentMode: store.DeploymentModeSingleContainer,
+		TemplateConfig: `{"version":1,"internal_port":8080,"restart_policy":"always","serving_network":"proxy","health":{"command":"true","timeout_seconds":5}}`,
+	}
+	if err := st.CreateService(ctx, svc); err != nil {
+		t.Fatal(err)
+	}
+	current := "nori-" + strconv.FormatInt(svc.ID, 10) + "-app"
+	labels := map[string]string{
+		"nori.service": "api", "nori.template": "1",
+		"nori.service-id": strconv.FormatInt(svc.ID, 10), "nori.role": "app",
+	}
+	dk := &docker.Fake{
+		Networks: map[string]docker.ManagedResource{"proxy": {Name: "proxy"}},
+		ManagedContainers: map[string]docker.ManagedContainer{
+			current: {ManagedContainerSpec: docker.ManagedContainerSpec{Name: current, Labels: labels}, State: "running"},
+		},
+	}
+	ex := New(st, &fakeRunner{}, func(context.Context, string) (string, error) { return "sha256:new", nil }, 0)
+	ex.SetDocker(dk)
+
+	id, err := ex.Deploy(ctx, svc.ID, store.TriggerManual)
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if deployment := waitForDeployment(t, st, id); deployment.Status != store.DeploySuccess {
+		t.Fatalf("template redeploy status = %s, log = %q", deployment.Status, deployment.Log)
+	}
+	app := dk.ManagedContainers[current]
+	if app.PublishedPort != 0 {
+		t.Fatalf("redeployed app published port = %d, want 0 while current app serves", app.PublishedPort)
+	}
+	if containsOperation(dk.Operations, "stop container "+current) {
+		t.Fatalf("current app must remain serving during candidate creation, operations = %v", dk.Operations)
+	}
+}
+
 func TestDeploy_TemplateRejectsConcurrentDeployment(t *testing.T) {
 	st := openTestStore(t)
 	ctx := context.Background()

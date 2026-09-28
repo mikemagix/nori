@@ -7,6 +7,7 @@ import (
 	"io"
 	"maps"
 	"strconv"
+	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
@@ -154,14 +155,29 @@ func (r *realClient) RunProbe(ctx context.Context, probe ManagedProbe) error {
 	if err := r.cli.ContainerExecStart(ctx, execID.ID, container.ExecStartOptions{}); err != nil {
 		return managedError(err)
 	}
-	inspect, err := r.cli.ContainerExecInspect(ctx, execID.ID)
-	if err != nil {
-		return managedError(err)
+	return waitForExecCompletion(ctx, func(ctx context.Context) (container.ExecInspect, error) {
+		return r.cli.ContainerExecInspect(ctx, execID.ID)
+	}, probe.Container)
+}
+
+func waitForExecCompletion(ctx context.Context, inspect func(context.Context) (container.ExecInspect, error), name string) error {
+	for {
+		result, err := inspect(ctx)
+		if err != nil {
+			return managedError(err)
+		}
+		if !result.Running {
+			if result.ExitCode != 0 {
+				return fmt.Errorf("health probe for %s exited with status %d", name, result.ExitCode)
+			}
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
 	}
-	if inspect.ExitCode != 0 {
-		return fmt.Errorf("health probe for %s exited with status %d", probe.Container, inspect.ExitCode)
-	}
-	return nil
 }
 
 func (r *realClient) runNetworkProbe(ctx context.Context, probe ManagedProbe) error {

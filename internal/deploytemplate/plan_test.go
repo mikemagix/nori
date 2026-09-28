@@ -68,6 +68,23 @@ func TestBuildPlanPostgresRejectsMutableImageAndUnsafeHealth(t *testing.T) {
 	}
 }
 
+func TestBuildPlanPostgresRejectsShellSyntaxInImage(t *testing.T) {
+	_, err := BuildPlan(Input{
+		ServiceID: 1, ServiceName: "api", TargetImage: "example/api@sha256:abc",
+		Config: Config{
+			Mode: ModePostgres, Version: 1, InternalPort: 8080, RestartPolicy: RestartAlways,
+			Health:   HealthCheck{Command: "true", TimeoutSeconds: 5},
+			Postgres: &PostgresConfig{Image: "postgres:16.4$(touch-pwned)", Database: "api", User: "api", PasswordEnv: "POSTGRES_PASSWORD", ConnectionURLEnv: "DATABASE_URL", ReadyTimeoutSeconds: 5},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected shell syntax in postgres image to be rejected")
+	}
+	if !strings.Contains(err.Error(), "postgres image") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestRenderCustomScriptUsesRuntimeReferencesWithoutSecretValues(t *testing.T) {
 	plan, err := BuildPlan(Input{
 		ServiceID: 7, ServiceName: "api", TargetImage: "example/api@sha256:abc",
@@ -105,6 +122,34 @@ func TestRenderCustomScriptUsesRuntimeReferencesWithoutSecretValues(t *testing.T
 	}
 }
 
+func TestRenderCustomScriptChecksOwnershipBeforeReusingResources(t *testing.T) {
+	plan, err := BuildPlan(Input{
+		ServiceID: 7, ServiceName: "api", TargetImage: "example/api@sha256:abc",
+		Config: Config{
+			Mode: ModeSingleContainer, Version: 1, InternalPort: 3000, RestartPolicy: RestartAlways,
+			Volumes: []VolumeMount{{Name: "uploads", Target: "/app/uploads"}},
+			Health:  HealthCheck{Command: "true", TimeoutSeconds: 15},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := plan.RenderCustomScript()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"check_owned_resource volume 'nori-7-volume-uploads' 'data-volume'",
+		"check_owned_container 'nori-7-app-candidate'",
+		"check_owned_container 'nori-7-app'",
+		"check_owned_container 'nori-7-app-rollback'",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("script missing ownership check %q:\n%s", want, script)
+		}
+	}
+}
+
 func TestRenderPostgresCustomScriptMaterializesDatabaseBeforeApp(t *testing.T) {
 	plan, err := BuildPlan(Input{
 		ServiceID: 8, ServiceName: "api", TargetImage: "example/api@sha256:abc",
@@ -124,7 +169,7 @@ func TestRenderPostgresCustomScriptMaterializesDatabaseBeforeApp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"nori-8-postgres", "POSTGRES_PASSWORD", "nori-8-db-internal", "docker pull \"postgres:16.4\""} {
+	for _, want := range []string{"nori-8-postgres", "POSTGRES_PASSWORD", "nori-8-db-internal", "docker pull 'postgres:16.4'"} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("script missing %q:\n%s", want, script)
 		}
@@ -142,7 +187,7 @@ func TestRenderPostgresCustomScriptMaterializesDatabaseBeforeApp(t *testing.T) {
 	if strings.Contains(script, "--env-file \"$ENV_FILE\" postgres:16.4") {
 		t.Fatalf("database container must not receive the full application environment:\n%s", script)
 	}
-	if strings.Index(script, "docker pull \"postgres:16.4\"") > strings.Index(script, "nori-8-postgres") {
+	if strings.Index(script, "docker pull 'postgres:16.4'") > strings.Index(script, "nori-8-postgres") {
 		t.Fatalf("database must be pulled before it is created:\n%s", script)
 	}
 }

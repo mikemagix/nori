@@ -4,7 +4,23 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/docker/docker/api/types/container"
 )
+
+func TestWaitForExecCompletionWaitsForRunningExec(t *testing.T) {
+	calls := 0
+	err := waitForExecCompletion(context.Background(), func(context.Context) (container.ExecInspect, error) {
+		calls++
+		return container.ExecInspect{Running: calls == 1}, nil
+	}, "nori-1-app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("inspect calls = %d, want 2", calls)
+	}
+}
 
 func TestFakeEnsureManagedResourceRejectsForeignOwnership(t *testing.T) {
 	fake := &Fake{

@@ -342,10 +342,11 @@ func (e *Executor) runTemplateDeploy(ctx context.Context, svc *store.Service, pl
 			}
 		}()
 	}
+	publishPort := !preflight.current || currentStopped
 	if _, err := fmt.Fprintf(output, "Creating candidate %s\n", plan.AppCandidate.Name); err != nil {
 		return err
 	}
-	if err := dk.CreateContainer(ctx, applicationSpec(plan, values, true)); err != nil {
+	if err := dk.CreateContainer(ctx, applicationSpec(plan, values, publishPort)); err != nil {
 		return fmt.Errorf("create application candidate: %w", err)
 	}
 	if err := dk.StartContainer(ctx, plan.AppCandidate.Name); err != nil {
