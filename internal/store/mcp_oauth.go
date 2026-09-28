@@ -270,8 +270,11 @@ func (s *Store) ListOAuthManagedGrantFamilies(ctx context.Context) (map[string]s
 // mcpauth has already verified its immutable original approval metadata.
 func (s *Store) BootstrapOAuthGrant(ctx context.Context, a OAuthGrantBootstrap) error {
 	now := time.Now()
-	if a.ClientKey == "" || a.ClientName == "" || a.Family == "" || a.Scopes == "" || a.ApprovedAt.IsZero() || !a.ClientExpiresAt.After(now) || !a.FamilyExpiresAt.After(now) {
+	if a.ClientKey == "" || a.ClientName == "" || a.Family == "" || a.Scopes == "" || a.ApprovedAt.IsZero() {
 		return errors.New("invalid OAuth grant bootstrap")
+	}
+	if !a.ClientExpiresAt.After(now) || !a.FamilyExpiresAt.After(now) {
+		return ErrNotFound
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -367,9 +370,6 @@ func insertOAuthTx(ctx context.Context, tx *sql.Tx, r OAuthRecord) error {
 // credential-bearing OAuth payloads.
 func (s *Store) ListOAuthGrantManagement(ctx context.Context) ([]OAuthRegistration, error) {
 	now := time.Now().Unix()
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM mcp_oauth WHERE expires <= ?`, now); err != nil {
-		return nil, err
-	}
 	registrations, byKey, err := s.listOAuthManagedRegistrations(ctx, now)
 	if err != nil {
 		return nil, err

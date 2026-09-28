@@ -101,10 +101,15 @@ func (s *Server) bootstrapOAuthGrantManagement(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	handled := make(map[string]struct{})
 	bootstrap := func(g grant, approvedAt time.Time, scopes string) error {
 		if _, ok := projectedFamilies[g.Family]; ok {
 			return nil
 		}
+		if _, ok := handled[g.Family]; ok {
+			return nil
+		}
+		handled[g.Family] = struct{}{}
 		clientRecord, err := s.st.GetOAuth(ctx, digest(g.ClientID), "client")
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
@@ -113,12 +118,12 @@ func (s *Server) bootstrapOAuthGrantManagement(ctx context.Context) error {
 			return err
 		}
 		var client storedClient
-		if json.Unmarshal(clientRecord.Data, &client) != nil || client.Client.Name == "" || client.Epoch != config.Epoch || clientRecord.Used {
+		if json.Unmarshal(clientRecord.Data, &client) != nil || client.Epoch != config.Epoch || clientRecord.Used {
 			return nil
 		}
 		err = s.st.BootstrapOAuthGrant(ctx, store.OAuthGrantBootstrap{
 			ClientKey:       digest(g.ClientID),
-			ClientName:      client.Client.Name,
+			ClientName:      oauthClientDisplayName(client.Client.Name),
 			ClientExpiresAt: time.Unix(clientRecord.Expires, 0),
 			ApprovedAt:      approvedAt,
 			Family:          g.Family,

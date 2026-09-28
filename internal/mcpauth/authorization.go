@@ -103,7 +103,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, c store.MCPCo
 		}
 		if _, err := s.st.ApproveOAuthGrant(r.Context(), store.OAuthGrantApproval{
 			ClientKey:       digest(cl.Client.ID),
-			ClientName:      cl.Client.Name,
+			ClientName:      oauthClientDisplayName(cl.Client.Name),
 			ClientExpiresAt: now.Add(approvedClientLifetime),
 			ApprovedAt:      now,
 			Family:          g.Family,
